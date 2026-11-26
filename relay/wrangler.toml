@@ -16,3 +16,5 @@ new_sqlite_classes = ["Relay"]
 
 [vars]
 RELAY_ORIGIN = "https://local-commander.davlug3.workers.dev"
+GITHUB_CLIENT_ID = "Ov23liVz6LlL5rA6QSI2"
+GITHUB_OWNER_ID = "112188845"
