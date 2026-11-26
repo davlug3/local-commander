@@ -77,13 +77,15 @@ async function approve(provider, auth, headers) {
   return new Response(null, { status: 303, headers });
 }
 
-async function githubCallback(provider, request, env) {
+async function githubCallback(provider, request, env, setStage) {
+  setStage("github-callback-state");
   const { request: auth, data, headers } = await provider.finishUpstream(request);
   const code = new URL(request.url).searchParams.get("code");
   if (!code) {
     headers.set("Location", authorizationErrorRedirect(auth, "access_denied"));
     return new Response(null, { status: 303, headers });
   }
+  setStage("github-token-exchange");
   const token = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: { Accept: "application/json" },
@@ -96,25 +98,33 @@ async function githubCallback(provider, request, env) {
     }),
     redirect: "error",
   });
-  const { access_token } = await token.json();
-  if (!token.ok || !access_token) throw new Error("GitHub token exchange failed.");
+  const { access_token, error } = await token.json();
+  if (!token.ok || !access_token) {
+    const known = ["incorrect_client_credentials", "redirect_uri_mismatch", "bad_verification_code", "bad_code_verifier"];
+    if (known.includes(error)) setStage("github-token-exchange/" + error);
+    throw new Error("GitHub token exchange failed.");
+  }
+  setStage("github-user-lookup");
   const user = await fetch("https://api.github.com/user", {
     headers: { Authorization: "Bearer " + access_token, "User-Agent": "LocalCommander", Accept: "application/vnd.github+json" },
     redirect: "error",
   });
-  if (!user.ok || String((await user.json()).id) !== String(env.GITHUB_OWNER_ID)) {
-    headers.set("Location", authorizationErrorRedirect(auth, "access_denied"));
-    return new Response(null, { status: 303, headers });
+  if (!user.ok) throw new Error("GitHub user lookup failed.");
+  if (String((await user.json()).id) !== String(env.GITHUB_OWNER_ID)) {
+    setStage("github-owner-mismatch");
+    throw new Error("GitHub owner verification failed.");
   }
+  setStage("localcommander-grant");
   return approve(provider, auth, headers);
 }
 
 async function authorize(request, env) {
   const url = new URL(request.url);
   const provider = env.OAUTH_PROVIDER;
+  let stage = "authorization-request";
   try {
     if (url.pathname === "/github/callback" && request.method === "GET" && githubEnabled(env)) {
-      return await githubCallback(provider, request, env);
+      return await githubCallback(provider, request, env, (step) => { stage = step; });
     }
     if (url.pathname !== "/authorize") return new Response(null, { status: 404 });
     if (request.method === "GET") {
@@ -140,7 +150,9 @@ ${github}${passphrase}`, { headers });
     const form = await request.formData();
     const method = form.get("method");
     if (method === "github" && githubEnabled(env)) {
+      stage = "github-consent";
       const approved = await provider.approveConsent(request, String(form.get("handle")));
+      stage = "github-redirect";
       const verifier = crypto.randomUUID() + crypto.randomUUID();
       const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
       const challenge = btoa(String.fromCharCode(...new Uint8Array(hash))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -162,7 +174,9 @@ ${github}${passphrase}`, { headers });
     const approved = await provider.approveConsent(request, String(form.get("handle")));
     return await approve(provider, approved.request, approved.headers);
   } catch {
-    return new Response("Authorization failed. Restart the connection from your client.", { status: 400 });
+    return new Response(`Authorization failed (${stage}). Restart the connection from your client.`, {
+      status: 400, headers: { "Cache-Control": "no-store" },
+    });
   }
 }
 
