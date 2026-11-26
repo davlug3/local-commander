@@ -5,10 +5,7 @@ import base64
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-import heapq
-import os
 import select
-import stat
 import secrets
 import sys
 import time
@@ -17,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import webbrowser
 
-from server import DEFAULT_COMMANDS, MAX_OUTPUT, WORKSPACE, run_command
+from server import DEFAULT_COMMANDS, WORKSPACE, run_command
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -43,7 +40,7 @@ class OAuth:
             body = json.dumps(data).encode()
         request = Request(self.origin + path, data=body, headers=headers)
         with self.opener.open(request, timeout=10) as response:
-            return None if response.status == 204 else json.loads(response.read(32_768))
+            return None if response.status == 204 else json.loads(response.read(65_536))
 
     def sign_in(self):
         state = secrets.token_urlsafe(32)
@@ -111,42 +108,17 @@ def tool_result(text, failed=False):
     return {"content": [{"type": "text", "text": text}], "isError": failed}
 
 
-def largest_files():
-    deadline = time.monotonic() + 10
-    def sizes():
-        for folder, directories, filenames in os.walk(WORKSPACE):
-            if time.monotonic() >= deadline:
-                raise TimeoutError
-            directories[:] = [name for name in directories if name != ".git"]
-            for filename in filenames:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError
-                path = os.path.join(folder, filename)
-                try:
-                    entry = os.lstat(path)
-                except OSError:
-                    continue
-                if stat.S_ISREG(entry.st_mode):
-                    yield entry.st_size, os.path.relpath(path, WORKSPACE)
-    try:
-        largest = heapq.nlargest(20, sizes())
-    except TimeoutError:
-        return tool_result("The workspace scan exceeded 10 seconds.", True)
-    lines = [f"{size:>12} B  {json.dumps(path)}" for size, path in largest]
-    text = "\n".join(lines) or "No readable regular files found."
-    return tool_result(text if len(text) <= MAX_OUTPUT else text[:MAX_OUTPUT] + "\n[Output truncated]")
-
-
-def run_job(job, allow_shell, poll_started):
+def run_job(job, allow_shell, poll_started, session_approvals):
     tool = job.get("tool")
-    if tool == "largest_files":
-        return largest_files()
     if tool == "run_shell_command":
         if not allow_shell:
             return tool_result("Restart the host client with --allow-shell to approve shell commands.", True)
         command = job.get("command")
-        if not isinstance(command, str) or not command.strip() or len(command) > 2048 or "\0" in command:
+        if not isinstance(command, str) or not command.strip() or len(command) > 8192 or "\0" in command:
             return tool_result("Invalid shell command.", True)
+        permission = job.get("permission", "once")
+        if permission not in ("once", "session"):
+            return tool_result("Invalid permission level.", True)
         remaining = job.get("remainingMs", 0)
         if not isinstance(remaining, int):
             return tool_result("Invalid approval deadline.", True)
@@ -154,19 +126,25 @@ def run_job(job, allow_shell, poll_started):
         wait = min(40, deadline - time.monotonic())
         if wait <= 0:
             return tool_result("Command approval expired.", True)
+        argv = ["/bin/bash", "--noprofile", "--norc", "-c", command]
+        if permission == "session" and command in session_approvals:
+            return run_command(argv)
         approval = "yes " + secrets.token_hex(3)
+        scope = "once" if permission == "once" else "this exact command for the current session"
         try:
             with open("/dev/tty", encoding="utf-8") as terminal:
                 print(f"\nLocal Commander shell request in {json.dumps(str(WORKSPACE))}\n"
                       f"{json.dumps(command)}\n"
-                      f"Type {approval} to run this command and share its output: ",
+                      f"Type {approval} to approve {scope} and share the output: ",
                       file=sys.stderr, flush=True)
                 ready, _, _ = select.select([terminal], [], [], max(0, min(wait, deadline - time.monotonic())))
                 if not ready or terminal.readline().strip() != approval or time.monotonic() >= deadline:
                     return tool_result("Command denied or approval expired.", True)
         except OSError:
             return tool_result("Local approval requires an interactive terminal.", True)
-        return run_command(["/bin/bash", "--noprofile", "--norc", "-c", command])
+        if permission == "session":
+            session_approvals.add(command)
+        return run_command(argv)
     command = DEFAULT_COMMANDS.get(tool)
     if command is None:
         return tool_result("Unknown local tool.", True)
@@ -186,13 +164,14 @@ def main():
     origin = f"https://{url.netloc.lower()}"
     oauth = OAuth(origin)
     tokens = oauth.sign_in()
+    session_approvals = set()
     print(f"Signed in. Polling {origin} for tools in {WORKSPACE}. Press Ctrl-C to stop.", file=sys.stderr)
     while True:
         try:
             poll_started = time.monotonic()
             job = oauth.post("/mcp/host/poll", {}, tokens["access_token"])
             if job:
-                result = run_job(job, args.allow_shell, poll_started)
+                result = run_job(job, args.allow_shell, poll_started, session_approvals)
                 oauth.post("/mcp/host/result", {
                     "id": job["id"],
                     "text": result["content"][0]["text"],
@@ -200,6 +179,7 @@ def main():
                 }, tokens["access_token"])
         except HTTPError as error:
             if error.code == 401:
+                session_approvals.clear()
                 tokens = oauth.refresh(tokens)
                 continue
             if error.code in {403, 404}:
