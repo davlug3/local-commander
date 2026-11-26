@@ -16,14 +16,17 @@ const schema = {
 
 const shellSchema = {
   name: "run_shell_command",
-  description: "Run a Bash command after local approval. Ask the user whether to approve one run or repeated runs of this exact command during the current host session before calling.",
+  description: "Run a Bash command using the paired host’s approval policy. Omit permission unless the user explicitly requests one-time or session approval. An explicit one-time request always prompts on the host.",
   inputSchema: {
     type: "object",
     properties: {
       command: { type: "string", minLength: 1, maxLength: 8192 },
-      permission: { type: "string", enum: ["once", "session"] },
+      permission: {
+        type: "string", enum: ["once", "session"],
+        description: "Omit to use the host default. Use once or session only when the user requests it.",
+      },
     },
-    required: ["command", "permission"],
+    required: ["command"],
     additionalProperties: false,
   },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -259,8 +262,8 @@ const oauthOptions = {
       let job;
       if (params.name === schema.name && Object.keys(args).length === 1 && tools.includes(args.tool)) {
         job = { tool: args.tool };
-      } else if (params.name === shellSchema.name && Object.keys(args).length === 2 &&
-          ["once", "session"].includes(args.permission) && typeof args.command === "string" &&
+      } else if (params.name === shellSchema.name && Object.keys(args).every((key) => key === "command" || key === "permission") &&
+          (args.permission === undefined || ["once", "session"].includes(args.permission)) && typeof args.command === "string" &&
           args.command.length <= 8192 && args.command.trim() && !args.command.includes("\0")) {
         job = { tool: shellSchema.name, command: args.command, permission: args.permission };
       } else {
