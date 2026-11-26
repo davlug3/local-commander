@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { OAuthProvider, authorizationErrorRedirect } from "@cloudflare/workers-oauth-provider";
 
-const tools = ["git_status", "python_version", "largest_files"];
+const tools = ["git_status", "python_version"];
 const schema = {
   name: "run_local_tool",
-  description: "Check Git status, Python version, or the 20 largest files in the paired workspace.",
+  description: "Check Git status or Python version on the paired machine.",
   inputSchema: {
     type: "object",
     properties: { tool: { type: "string", enum: tools } },
@@ -16,11 +16,14 @@ const schema = {
 
 const shellSchema = {
   name: "run_shell_command",
-  description: "Propose a Bash command. The paired computer must approve the exact command before it runs.",
+  description: "Run a Bash command after local approval. Ask the user whether to approve one run or repeated runs of this exact command during the current host session before calling.",
   inputSchema: {
     type: "object",
-    properties: { command: { type: "string", minLength: 1, maxLength: 2048 } },
-    required: ["command"],
+    properties: {
+      command: { type: "string", minLength: 1, maxLength: 8192 },
+      permission: { type: "string", enum: ["once", "session"] },
+    },
+    required: ["command", "permission"],
     additionalProperties: false,
   },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -186,7 +189,7 @@ const oauthOptions = {
       if (path !== "/mcp") return new Response(null, { status: 404 });
       if (ctx.props.role === "host") return new Response(null, { status: 403 });
       const raw = await request.text();
-      if (raw.length > 16384) return new Response(null, { status: 413 });
+      if (raw.length > 65536) return new Response(null, { status: 413 });
       let message;
       try { message = JSON.parse(raw); } catch { return rpc(null, null, -32700, "Parse error"); }
       if (message?.jsonrpc !== "2.0" || typeof message.method !== "string") {
@@ -207,13 +210,14 @@ const oauthOptions = {
       if (method === "tools/list") return rpc(id, { tools: [schema, shellSchema] });
       if (method !== "tools/call") return rpc(id, null, -32601, "Method not found");
       const args = params?.arguments;
-      if (!args || Object.keys(args).length !== 1) return rpc(id, null, -32602, "Invalid arguments");
+      if (!args || typeof args !== "object" || Array.isArray(args)) return rpc(id, null, -32602, "Invalid arguments");
       let job;
-      if (params.name === schema.name && tools.includes(args.tool)) {
+      if (params.name === schema.name && Object.keys(args).length === 1 && tools.includes(args.tool)) {
         job = { tool: args.tool };
-      } else if (params.name === shellSchema.name && typeof args.command === "string" &&
-          args.command.length <= 2048 && args.command.trim() && !args.command.includes("\0")) {
-        job = { tool: shellSchema.name, command: args.command };
+      } else if (params.name === shellSchema.name && Object.keys(args).length === 2 &&
+          ["once", "session"].includes(args.permission) && typeof args.command === "string" &&
+          args.command.length <= 8192 && args.command.trim() && !args.command.includes("\0")) {
+        job = { tool: shellSchema.name, command: args.command, permission: args.permission };
       } else {
         return rpc(id, null, -32602, "Invalid tool or arguments");
       }
