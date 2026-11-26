@@ -30,6 +30,16 @@ once at startup, add `--approve-all-session` and enter the startup confirmation
 in your terminal. Ordinary shell requests then follow the host default. An
 explicit one-time request still prompts. See [approval modes](relay/README.md#shell-approval-modes).
 
+### Start the davlug3 relay client with session-wide approval
+
+```bash
+python3 "${XDG_DATA_HOME:-$HOME/.local/share}/local-commander/connect.py" \
+  --allow-shell --approve-all-session \
+  https://local-commander.davlug3.workers.dev
+```
+
+Enter the startup confirmation in your terminal, then sign in.
+
 ## Local Codex or another stdio MCP client
 
 Unzip this package on your machine. In Codex, register the local server with
