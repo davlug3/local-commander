@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "local-commander",
+  "version": "0.1.0",
+  "description": "Run owner-configured tools on the local machine via MCP.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Local Commander",
+        "shortDescription": "Run configured local tools"
+      }
+    }
+  }
+}
