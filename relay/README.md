@@ -8,7 +8,7 @@ where you launch the client.
 
 ## 1. Deploy the relay
 
-From this directory, with Node.js 24 and npm:
+From the repository's `relay/` directory, with Node.js 24 and npm:
 
 ```bash
 npm ci
@@ -16,7 +16,7 @@ npx wrangler login
 npx wrangler kv namespace create OAUTH_KV
 ```
 
-Copy the namespace ID into `wrangler.toml`. Set `RELAY_ORIGIN` to the exact
+Reuse the namespace ID if you already created it. Copy the ID into `wrangler.toml`. Set `RELAY_ORIGIN` to the exact
 origin of your Worker using your Cloudflare Workers subdomain. Use lowercase
 and omit the trailing slash. If you change the Worker name, update the origin
 to match.
@@ -38,22 +38,26 @@ GitHub user ID. The Worker compares the numeric ID during sign-in.
 
 ```toml
 GITHUB_CLIENT_ID = "YOUR_GITHUB_OAUTH_APP_CLIENT_ID"
-GITHUB_OWNER_ID = "112188845"
+GITHUB_OWNER_ID = "YOUR_NUMERIC_GITHUB_USER_ID"
 ```
+
+You can find your numeric user ID with `gh api users/YOUR_LOGIN --jq .id`.
 
 Upload the app's client secret through Wrangler. The GitHub button appears
 when the client ID and secret are configured.
 
 ```bash
 npx wrangler secret put GITHUB_CLIENT_SECRET
+```
+
+Deploy the Worker after configuring your sign-in method:
+
+```bash
 npx wrangler deploy
 ```
 
-The updated Worker uses OAuth for host polling and tool calls. Once you've
-verified the new host client, you can delete the obsolete `HOST_TOKEN`
-secret with `npx wrangler secret delete HOST_TOKEN`. Use one host client
-per Worker. An idle client polls every five seconds, or about 17,280
-requests per day.
+Use one host client per Worker. An idle client polls every five seconds, or
+about 17,280 requests per day.
 
 ## 2. Connect the machine
 
@@ -63,10 +67,10 @@ On the computer that should run the tools:
 curl -fsSL https://raw.githubusercontent.com/davlug3/local-commander/main/install.sh | bash
 cd /path/to/your/project
 python3 "${XDG_DATA_HOME:-$HOME/.local/share}/local-commander/connect.py" \
-  https://local-commander.davlug3.workers.dev
+  https://YOUR-WORKER.workers.dev
 ```
 
-Use your own Worker origin if you deployed a separate copy.
+Replace the placeholder with your Worker origin.
 
 The client opens a browser on your computer. Choose **Sign in with GitHub**
 or **Sign in with passphrase**, then return to the terminal. Leave the client running. If you used
@@ -83,25 +87,42 @@ hostname and choose either configured sign-in method to authorize the plugin. Te
 Stopping the Python client stops local tool execution. The original stdio
 server is also available for local Codex and OpenAI Secure MCP Tunnel.
 
+## Shell approval modes
 
-## Shell commands
+Append `--allow-shell` when starting the client to enable Bash requests.
+For blanket approval, start it with both flags:
 
-Start `connect.py` with `--allow-shell` to enable Bash requests. When ChatGPT
-omits the permission and blanket approval is off, the host requests one-time
-approval. You can explicitly request session approval for repeat runs of the
-exact command. The terminal shows the command and workspace before approval.
-Session approvals are kept in memory and clear on client exit or token renewal.
-A one-run request always asks for local confirmation.
+```bash
+python3 "${XDG_DATA_HOME:-$HOME/.local/share}/local-commander/connect.py" \
+  --allow-shell --approve-all-session https://YOUR-WORKER.workers.dev
+```
 
-Bash runs as your current user, with the workspace as its starting directory.
+Type the full `approve all <code>` phrase shown in the terminal, then sign in.
+This grants any OAuth client with shell access on the relay permission to run
+Bash commands as your local user under the host default or session mode.
+The terminal displays commands run without prompting. Stop the client to clear
+the startup approval.
+
+| Request permission | With `--allow-shell` | With both flags and startup approval |
+| --- | --- | --- |
+| Omitted (host default) | Prompt once for that run | Run without another prompt |
+| `once` | Prompt for that run | Prompt for that run |
+| `session` | Prompt the first time for each exact command | Run without another prompt |
+
+Exact-command approvals clear when the client exits or renews its OAuth token.
+Bash starts in the client workspace and runs with the current user's permissions.
 Commands have a 15-second execution timeout and an 8 KiB output limit.
 
-### Approve all session commands
+## Update an existing setup
 
-Start the client with both `--allow-shell` and `--approve-all-session` and
-enter the startup confirmation in your terminal. After sign-in, any OAuth
-client authorized to invoke shell tools on this relay can run any valid Bash
-command without another prompt when the request uses the host default or
-explicitly requests session approval. The terminal still displays each command.
-Explicit one-time requests always prompt. This setting clears when you stop the
-client.
+From the repository root, pull and redeploy the Worker:
+
+```bash
+git pull --ff-only && (cd relay && npx wrangler deploy)
+```
+
+Stop the old client, rerun the installer from [Connect the machine](#2-connect-the-machine),
+and restart with your preferred flags. Refresh the plugin from its ChatGPT
+details page after a tool schema change. If the terminal says it is asking you
+to approve a command **once**, the caller explicitly requested one-time approval.
+To use the host default, ask ChatGPT to omit the permission argument.
