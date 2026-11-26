@@ -16,11 +16,12 @@ const schema = {
 
 const shellSchema = {
   name: "run_shell_command",
-  description: "Run a Bash command using the paired host’s approval policy. Omit permission unless the user explicitly requests one-time or session approval. An explicit one-time request always prompts on the host.",
+  description: "Run a Bash command using the paired host’s approval policy. Omit permission unless the user explicitly requests one-time or session approval. Use background mode for installs, builds, or other long-running commands. An explicit one-time request always prompts on the host.",
   inputSchema: {
     type: "object",
     properties: {
       command: { type: "string", minLength: 1, maxLength: 8192 },
+      mode: { type: "string", enum: ["foreground", "background"] },
       permission: {
         type: "string", enum: ["once", "session"],
         description: "Omit to use the host default. Use once or session only when the user requests it.",
@@ -30,6 +31,18 @@ const shellSchema = {
     additionalProperties: false,
   },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+};
+
+const jobStatusSchema = {
+  name: "get_shell_job_status",
+  description: "Check a background shell job by ID. Returns its current status, final exit code when available, and recent output.",
+  inputSchema: {
+    type: "object",
+    properties: { job_id: { type: "string", pattern: "^[0-9a-f]{32}$" } },
+    required: ["job_id"],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true },
 };
 
 function json(value, status = 200) {
@@ -255,17 +268,21 @@ const oauthOptions = {
         });
       }
       if (method === "ping") return rpc(id, {});
-      if (method === "tools/list") return rpc(id, { tools: [schema, shellSchema] });
+      if (method === "tools/list") return rpc(id, { tools: [schema, shellSchema, jobStatusSchema] });
       if (method !== "tools/call") return rpc(id, null, -32601, "Method not found");
       const args = params?.arguments;
       if (!args || typeof args !== "object" || Array.isArray(args)) return rpc(id, null, -32602, "Invalid arguments");
       let job;
       if (params.name === schema.name && Object.keys(args).length === 1 && tools.includes(args.tool)) {
         job = { tool: args.tool };
-      } else if (params.name === shellSchema.name && Object.keys(args).every((key) => key === "command" || key === "permission") &&
-          (args.permission === undefined || ["once", "session"].includes(args.permission)) && typeof args.command === "string" &&
+      } else if (params.name === shellSchema.name && Object.keys(args).every((key) => ["command", "permission", "mode"].includes(key)) &&
+          (args.permission === undefined || ["once", "session"].includes(args.permission)) &&
+          (args.mode === undefined || ["foreground", "background"].includes(args.mode)) && typeof args.command === "string" &&
           args.command.length <= 8192 && args.command.trim() && !args.command.includes("\0")) {
-        job = { tool: shellSchema.name, command: args.command, permission: args.permission };
+        job = { tool: shellSchema.name, command: args.command, permission: args.permission, mode: args.mode };
+      } else if (params.name === jobStatusSchema.name && Object.keys(args).length === 1 &&
+          typeof args.job_id === "string" && /^[0-9a-f]{32}$/.test(args.job_id)) {
+        job = { tool: jobStatusSchema.name, job_id: args.job_id };
       } else {
         return rpc(id, null, -32602, "Invalid tool or arguments");
       }
