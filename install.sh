@@ -137,6 +137,11 @@ import base64
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import os
+import signal
+import subprocess
+import tempfile
+from uuid import uuid4
 import select
 import secrets
 import sys
@@ -240,14 +245,68 @@ def tool_result(text, failed=False):
     return {"content": [{"type": "text", "text": text}], "isError": failed}
 
 
-def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False):
+class ShellJobs:
+    def __init__(self):
+        self.jobs = {}
+
+    def start(self, argv):
+        if len(self.jobs) >= 16:
+            for job_id, (process, output) in self.jobs.items():
+                if process.poll() is not None:
+                    output.close()
+                    del self.jobs[job_id]
+                    break
+            else:
+                return tool_result("All 16 background job slots are busy.", True)
+        output = tempfile.TemporaryFile()
+        try:
+            process = subprocess.Popen(
+                argv, cwd=WORKSPACE, stdin=subprocess.DEVNULL, stdout=output,
+                stderr=subprocess.STDOUT, start_new_session=True,
+            )
+        except OSError as error:
+            output.close()
+            return tool_result(f"Could not start background command: {error}", True)
+        job_id = uuid4().hex
+        self.jobs[job_id] = (process, output)
+        return tool_result(f"Background job started. Job ID: {job_id}")
+
+    def status(self, job_id):
+        if not isinstance(job_id, str) or job_id not in self.jobs:
+            return tool_result("Unknown background job in this client session.", True)
+        process, output = self.jobs[job_id]
+        code = process.poll()
+        size = os.fstat(output.fileno()).st_size
+        tail = os.pread(output.fileno(), 8192, max(0, size - 8192))
+        summary = "Running" if code is None else f"Finished with exit code {code}"
+        prefix = "\n[Showing the last 8192 bytes]\n" if size > 8192 else "\n"
+        return tool_result(summary + prefix + tail.decode("utf-8", errors="replace"), code not in (None, 0))
+
+    def close(self):
+        for process, output in self.jobs.values():
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            output.close()
+
+
+def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False, jobs=None):
     tool = job.get("tool")
+    if tool == "get_shell_job_status":
+        return jobs.status(job.get("job_id"))
     if tool == "run_shell_command":
         if not allow_shell:
             return tool_result("Restart the host client with --allow-shell to approve shell commands.", True)
         command = job.get("command")
         if not isinstance(command, str) or not command.strip() or len(command) > 8192 or "\0" in command:
             return tool_result("Invalid shell command.", True)
+        mode = job.get("mode", "foreground")
+        if mode not in ("foreground", "background"):
+            return tool_result("Invalid shell execution mode.", True)
+        execute = jobs.start if mode == "background" else run_command
         permission = job.get("permission", "session" if approve_all else "once")
         if permission not in ("once", "session"):
             return tool_result("Invalid permission level.", True)
@@ -262,12 +321,12 @@ def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False
         if permission == "session" and (approve_all or command in session_approvals):
             print(f"Running approved shell command in {json.dumps(str(WORKSPACE))}: "
                   f"{json.dumps(command)}", file=sys.stderr, flush=True)
-            return run_command(argv)
+            return execute(argv)
         approval = "yes " + secrets.token_hex(3)
         scope = "once" if permission == "once" else "this exact command for the current session"
         try:
             with open("/dev/tty", encoding="utf-8") as terminal:
-                print(f"\nLocal Commander shell request in {json.dumps(str(WORKSPACE))}\n"
+                print(f"\nLocal Commander {mode} shell request in {json.dumps(str(WORKSPACE))}\n"
                       f"{json.dumps(command)}\n"
                       f"Type {approval} to approve {scope} and share the output: ",
                       file=sys.stderr, flush=True)
@@ -278,7 +337,7 @@ def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False
             return tool_result("Local approval requires an interactive terminal.", True)
         if permission == "session":
             session_approvals.add(command)
-        return run_command(argv)
+        return execute(argv)
     command = DEFAULT_COMMANDS.get(tool)
     if command is None:
         return tool_result("Unknown local tool.", True)
@@ -320,12 +379,20 @@ def main():
     tokens = oauth.sign_in()
     session_approvals = set()
     print(f"Signed in. Polling {origin} for tools in {WORKSPACE}. Press Ctrl-C to stop.", file=sys.stderr)
+    jobs = ShellJobs()
+    try:
+        return poll(oauth, tokens, args, session_approvals, jobs)
+    finally:
+        jobs.close()
+
+
+def poll(oauth, tokens, args, session_approvals, jobs):
     while True:
         try:
             poll_started = time.monotonic()
             job = oauth.post("/mcp/host/poll", {}, tokens["access_token"])
             if job:
-                result = run_job(job, args.allow_shell, poll_started, session_approvals, args.approve_all_session)
+                result = run_job(job, args.allow_shell, poll_started, session_approvals, args.approve_all_session, jobs)
                 oauth.post("/mcp/host/result", {
                     "id": job["id"],
                     "text": result["content"][0]["text"],
