@@ -85,10 +85,14 @@ async function githubCallback(provider, request, env, setStage) {
     headers.set("Location", authorizationErrorRedirect(auth, "access_denied"));
     return new Response(null, { status: 303, headers });
   }
-  setStage("github-token-exchange");
+  setStage("github-token-exchange/request-failed");
   const token = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "LocalCommander",
+    },
     body: new URLSearchParams({
       client_id: env.GITHUB_CLIENT_ID,
       client_secret: env.GITHUB_CLIENT_SECRET,
@@ -98,9 +102,13 @@ async function githubCallback(provider, request, env, setStage) {
     }),
     redirect: "error",
   });
-  const { access_token, error } = await token.json();
+  setStage("github-token-exchange/http-" + token.status);
+  const { access_token, error } = await token.json().catch(() => ({}));
   if (!token.ok || !access_token) {
-    const known = ["incorrect_client_credentials", "redirect_uri_mismatch", "bad_verification_code", "bad_code_verifier"];
+    const known = [
+      "incorrect_client_credentials", "redirect_uri_mismatch", "bad_verification_code",
+      "bad_code_verifier", "unverified_user_email",
+    ];
     if (known.includes(error)) setStage("github-token-exchange/" + error);
     throw new Error("GitHub token exchange failed.");
   }
