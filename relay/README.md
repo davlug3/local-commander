@@ -143,3 +143,8 @@ the host client stays open. They have no Local Commander execution timeout.
 Output is spooled to a temporary file and job IDs are available only in the
 current client process. The client retains up to 16 jobs and discards a
 completed job when it needs a slot. Stop the client to terminate running jobs.
+
+When a job starts, click its **Live console** URL in the host terminal, or
+paste it into a browser on the same device. The console refreshes once per
+second and shows the latest 8 KiB of output. Output appears when the command
+flushes it. The link works only while that client and job record are available.
