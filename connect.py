@@ -116,7 +116,7 @@ def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False
         command = job.get("command")
         if not isinstance(command, str) or not command.strip() or len(command) > 8192 or "\0" in command:
             return tool_result("Invalid shell command.", True)
-        permission = job.get("permission", "once")
+        permission = job.get("permission", "session" if approve_all else "once")
         if permission not in ("once", "session"):
             return tool_result("Invalid permission level.", True)
         remaining = job.get("remainingMs", 0)
@@ -128,6 +128,8 @@ def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False
             return tool_result("Command approval expired.", True)
         argv = ["/bin/bash", "--noprofile", "--norc", "-c", command]
         if permission == "session" and (approve_all or command in session_approvals):
+            print(f"Running approved shell command in {json.dumps(str(WORKSPACE))}: "
+                  f"{json.dumps(command)}", file=sys.stderr, flush=True)
             return run_command(argv)
         approval = "yes " + secrets.token_hex(3)
         scope = "once" if permission == "once" else "this exact command for the current session"
@@ -159,7 +161,7 @@ def confirm_session_shell(origin):
         with open("/dev/tty", encoding="utf-8") as terminal:
             print(f"Session-wide shell access for {origin}\n"
                   f"Starting directory: {json.dumps(str(WORKSPACE))}\n"
-                  "Authorized clients can run any session-mode Bash command as your user "
+                  "Authorized clients can run any Bash command as your user using the host default or session approval "
                   "until you stop this client.\n"
                   f"Type {phrase} to enable it: ", file=sys.stderr, flush=True)
             return terminal.readline().strip() == phrase
@@ -172,7 +174,7 @@ def main():
     parser.add_argument("relay", help="Origin of your Cloudflare Worker")
     parser.add_argument("--allow-shell", action="store_true", help="Enable shell requests with local approval")
     parser.add_argument("--approve-all-session", action="store_true",
-                        help="Confirm once locally to approve all session-mode commands until this client exits")
+                        help="Confirm once locally to approve commands using the host default or session approval until this client exits")
     args = parser.parse_args()
     if args.approve_all_session and not args.allow_shell:
         parser.error("--approve-all-session requires --allow-shell")
