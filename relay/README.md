@@ -2,7 +2,7 @@
 
 Deploy a Worker in your Cloudflare account. The Worker handles MCP and OAuth.
 The Python client makes outbound HTTPS requests and offers
-`git_status`, `python_version`, and `largest_files`. It can also run Bash
+`git_status` and `python_version`. It can also run Bash
 commands after local approval when started with `--allow-shell`. The workspace defaults to the directory
 where you launch the client.
 
@@ -84,15 +84,14 @@ Stopping the Python client stops local tool execution. The original stdio
 server is also available for local Codex and OpenAI Secure MCP Tunnel.
 
 
-## Largest files and shell commands
+## Shell commands
 
-Ask ChatGPT to run `largest_files` to list the 20 largest regular files in the
-workspace by size in bytes. The scan skips `.git` directories and does not
-follow symlinks.
+Start `connect.py` with `--allow-shell` to enable Bash requests. ChatGPT asks
+whether you want to approve one run or repeated runs of the exact command
+during this client session. The terminal shows the command and workspace
+and asks for a confirmation phrase before granting either permission.
+Session approvals are kept in memory and clear on client exit or token renewal.
+A one-run request always asks for local confirmation.
 
-To allow shell requests, add `--allow-shell` when starting `connect.py`.
-Each request shows the exact command and workspace in your terminal. Type
-the displayed confirmation phrase to run that command. A missing, incorrect,
-or expired confirmation denies it. Bash runs with your local user permissions
-and the workspace as its starting directory. Commands have a 15-second
-execution timeout, and their returned output is limited to 8 KiB.
+Bash runs as your current user, with the workspace as its starting directory.
+Commands have a 15-second execution timeout and an 8 KiB output limit.
