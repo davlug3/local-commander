@@ -126,3 +126,17 @@ and restart with your preferred flags. Refresh the plugin from its ChatGPT
 details page after a tool schema change. If the terminal says it is asking you
 to approve a command **once**, the caller explicitly requested one-time approval.
 To use the host default, ask ChatGPT to omit the permission argument.
+
+## Background shell jobs
+
+Use background mode for installs, builds, renders, or any other long-running
+shell command. Ask ChatGPT to start the command in background mode and report
+the job ID. The usual approval policy applies. Check that ID with
+`get_shell_job_status` to see whether it is running, the exit code when it
+finishes, and the most recent 8 KiB of combined output.
+
+Foreground commands still have a 15-second limit. Background jobs run while
+the host client stays open. They have no Local Commander execution timeout.
+Output is spooled to a temporary file and job IDs are available only in the
+current client process. The client retains up to 16 jobs and discards a
+completed job when it needs a slot. Stop the client to terminate running jobs.
