@@ -130,16 +130,20 @@ if __name__ == "__main__":
     main()
 LOCAL_COMMANDER_PYTHON
     cat > "$staging/connect.py" <<'LOCAL_COMMANDER_CONNECT'
-"""Poll an HTTPS relay and run the built-in Local Commander tools."""
+"""Sign in through the browser, then run the built-in Local Commander tools."""
 
 import argparse
-import getpass
+import base64
+from hashlib import sha256
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import secrets
 import sys
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+import webbrowser
 
 from server import DEFAULT_COMMANDS, WORKSPACE, run_command
 
@@ -149,31 +153,102 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
+class OAuth:
+    def __init__(self, origin):
+        self.origin = origin
+        self.resource = origin + "/mcp"
+        self.opener = build_opener(NoRedirects())
+
+    def post(self, path, data, access_token=None, form=False):
+        headers = {"User-Agent": "LocalCommander/0.3", "Accept": "application/json"}
+        if access_token:
+            headers["Authorization"] = "Bearer " + access_token
+        if form:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            body = urlencode(data).encode()
+        else:
+            headers["Content-Type"] = "application/json"
+            body = json.dumps(data).encode()
+        request = Request(self.origin + path, data=body, headers=headers)
+        with self.opener.open(request, timeout=10) as response:
+            return None if response.status == 204 else json.loads(response.read(32_768))
+
+    def sign_in(self):
+        state = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(48)
+        challenge = base64.urlsafe_b64encode(sha256(verifier.encode()).digest()).decode().rstrip("=")
+        callback = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                url = urlsplit(self.path)
+                values = parse_qs(url.query)
+                if url.path != "/callback" or values.get("state") != [state]:
+                    self.send_error(400, "Invalid sign-in callback")
+                    return
+                callback.update(values)
+                self.send_response(200)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Return to your Local Commander terminal.")
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as listener:
+            listener.timeout = 1
+            redirect = f"http://127.0.0.1:{listener.server_port}/callback"
+            registration = self.post("/register", {
+                "client_name": "Local Commander host",
+                "redirect_uris": [redirect],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            })
+            self.client_id = registration["client_id"]
+            login = self.origin + "/authorize?" + urlencode({
+                "client_id": self.client_id, "redirect_uri": redirect, "resource": self.resource,
+                "response_type": "code", "scope": "host:connect", "state": state,
+                "code_challenge": challenge, "code_challenge_method": "S256",
+            })
+            print("Open this URL in a browser on this computer:", login, file=sys.stderr)
+            webbrowser.open(login)
+            deadline = time.monotonic() + 300
+            while not callback and time.monotonic() < deadline:
+                listener.handle_request()
+
+        if len(callback.get("code", [])) != 1 or callback.get("iss") != [self.origin]:
+            raise ValueError("Sign-in was denied, timed out, or returned an invalid issuer.")
+        return self.post("/token", {
+            "grant_type": "authorization_code", "client_id": self.client_id,
+            "redirect_uri": redirect, "code": callback["code"][0], "code_verifier": verifier,
+            "resource": self.resource,
+        }, form=True)
+
+    def refresh(self, tokens):
+        if not tokens.get("refresh_token"):
+            return self.sign_in()
+        return self.post("/token", {
+            "grant_type": "refresh_token", "client_id": self.client_id,
+            "refresh_token": tokens["refresh_token"], "resource": self.resource,
+        }, form=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("relay", help="Origin of your Cloudflare Worker")
     args = parser.parse_args()
-    origin = args.relay.rstrip("/")
-    url = urlsplit(origin)
+    url = urlsplit(args.relay.rstrip("/"))
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.path or url.query or url.fragment:
         parser.error("Provide an HTTPS origin with no path.")
-    token = getpass.getpass("Relay host token: ")
-    if len(token) < 32:
-        parser.error("The relay host token must have at least 32 characters.")
-    opener = build_opener(NoRedirects())
-
-    def post(path, data):
-        request = Request(origin + path, data=json.dumps(data).encode(), headers={
-            "Authorization": "Bearer " + token,
-            "Content-Type": "application/json",
-        })
-        with opener.open(request, timeout=10) as response:
-            return None if response.status == 204 else json.loads(response.read(16_384))
-
-    print(f"Polling {origin} for tools in {WORKSPACE}. Press Ctrl-C to stop.", file=sys.stderr)
+    origin = f"https://{url.netloc.lower()}"
+    oauth = OAuth(origin)
+    tokens = oauth.sign_in()
+    print(f"Signed in. Polling {origin} for tools in {WORKSPACE}. Press Ctrl-C to stop.", file=sys.stderr)
     while True:
         try:
-            job = post("/host/poll", {})
+            job = oauth.post("/mcp/host/poll", {}, tokens["access_token"])
             if job:
                 command = DEFAULT_COMMANDS.get(job.get("tool"))
                 if command is None:
@@ -181,15 +256,20 @@ def main():
                 if job["tool"] == "git_status":
                     command = [command[0], "-c", "core.fsmonitor=false", *command[1:]]
                 result = run_command(command)
-                post("/host/result", {
+                oauth.post("/mcp/host/result", {
                     "id": job["id"],
                     "text": result["content"][0]["text"],
                     "failed": result["isError"],
-                })
+                }, tokens["access_token"])
+        except HTTPError as error:
+            if error.code == 401:
+                tokens = oauth.refresh(tokens)
+                continue
+            if error.code in {403, 404}:
+                raise
+            print(f"Relay request failed: {error}", file=sys.stderr)
         except (ValueError, KeyError, URLError, TimeoutError) as error:
             print(f"Relay request failed: {error}", file=sys.stderr)
-            if isinstance(error, HTTPError) and error.code in {401, 403, 404}:
-                return 1
         time.sleep(5)
 
 
@@ -198,6 +278,8 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(0)
+    except (ValueError, KeyError, URLError, TimeoutError) as error:
+        sys.exit(f"Local Commander: {error}")
 LOCAL_COMMANDER_CONNECT
     python3 "$staging/connect.py" --help >/dev/null
     python3 "$staging/server.py" </dev/null
