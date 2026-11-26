@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { OAuthProvider, authorizationErrorRedirect } from "@cloudflare/workers-oauth-provider";
 
 const tools = ["git_status", "python_version"];
 const schema = {
@@ -25,13 +25,154 @@ async function matches(candidate, secret) {
   return crypto.subtle.timingSafeEqual(left, right);
 }
 
+const hostScope = "host:connect";
+const hostPrefix = "/mcp/host/";
+
+function roleFor(auth) {
+  const redirect = new URL(auth.redirectUri);
+  if (!auth.scope.includes(hostScope)) return "mcp";
+  if (auth.scope.length !== 1 || redirect.protocol !== "http:" ||
+      redirect.hostname !== "127.0.0.1" || !redirect.port ||
+      redirect.pathname !== "/callback" || redirect.search || redirect.hash) {
+    throw new Error("Host authorization requires the local client callback.");
+  }
+  return "host";
+}
+
+function githubEnabled(env) {
+  return Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET);
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
+  ));
+}
+
+async function approve(provider, auth, headers) {
+  const role = roleFor(auth);
+  const { redirectTo } = await provider.completeAuthorization({
+    request: auth,
+    userId: "owner",
+    metadata: {},
+    scope: auth.scope,
+    props: { owner: true, role },
+  });
+  headers.set("Location", redirectTo);
+  return new Response(null, { status: 303, headers });
+}
+
+async function githubCallback(provider, request, env) {
+  const { request: auth, data, headers } = await provider.finishUpstream(request);
+  const code = new URL(request.url).searchParams.get("code");
+  if (!code) {
+    headers.set("Location", authorizationErrorRedirect(auth, "access_denied"));
+    return new Response(null, { status: 303, headers });
+  }
+  const token = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    body: new URLSearchParams({
+      client_id: env.GITHUB_CLIENT_ID,
+      client_secret: env.GITHUB_CLIENT_SECRET,
+      redirect_uri: env.RELAY_ORIGIN + "/github/callback",
+      code,
+      code_verifier: data.verifier,
+    }),
+    redirect: "error",
+  });
+  const { access_token } = await token.json();
+  if (!token.ok || !access_token) throw new Error("GitHub token exchange failed.");
+  const user = await fetch("https://api.github.com/user", {
+    headers: { Authorization: "Bearer " + access_token, "User-Agent": "LocalCommander", Accept: "application/vnd.github+json" },
+    redirect: "error",
+  });
+  if (!user.ok || String((await user.json()).id) !== String(env.GITHUB_OWNER_ID)) {
+    headers.set("Location", authorizationErrorRedirect(auth, "access_denied"));
+    return new Response(null, { status: 303, headers });
+  }
+  return approve(provider, auth, headers);
+}
+
+async function authorize(request, env) {
+  const url = new URL(request.url);
+  const provider = env.OAUTH_PROVIDER;
+  try {
+    if (url.pathname === "/github/callback" && request.method === "GET" && githubEnabled(env)) {
+      return await githubCallback(provider, request, env);
+    }
+    if (url.pathname !== "/authorize") return new Response(null, { status: 404 });
+    if (request.method === "GET") {
+      const auth = await provider.parseAuthRequest(request);
+      const role = roleFor(auth);
+      const { handle, headers } = await provider.beginConsent(auth);
+      const hidden = `<input type="hidden" name="handle" value="${escapeHtml(handle)}">`;
+      const github = githubEnabled(env) ? `<form method="post" action="/authorize">${hidden}
+<button name="method" value="github">Sign in with GitHub</button></form>` : "";
+      const passphrase = env.OWNER_PASSPHRASE ? `<form method="post" action="/authorize">${hidden}
+<label>Owner passphrase <input required type="password" name="passphrase" autocomplete="current-password"></label>
+<button name="method" value="passphrase">Sign in with passphrase</button></form>` : "";
+      const description = role === "host" ? "Pair this computer to run the two configured tools." :
+        "Allow the requesting client to check Git status and Python version on your paired machine.";
+      headers.set("Content-Type", "text/html; charset=utf-8");
+      return new Response(`<!doctype html><meta charset="utf-8"><title>Local Commander</title>
+<h1>${role === "host" ? "Pair your computer" : "Connect Local Commander"}</h1>
+<p>${description}</p><p>Callback <code>${escapeHtml(auth.redirectUri)}</code></p>
+${github}${passphrase}`, { headers });
+    }
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    if (request.headers.get("Origin") !== url.origin) return new Response(null, { status: 403 });
+    const form = await request.formData();
+    const method = form.get("method");
+    if (method === "github" && githubEnabled(env)) {
+      const approved = await provider.approveConsent(request, String(form.get("handle")));
+      const verifier = crypto.randomUUID() + crypto.randomUUID();
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+      const challenge = btoa(String.fromCharCode(...new Uint8Array(hash))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const { state, headers } = await provider.beginUpstream(approved.request, { data: { verifier }, headers: approved.headers });
+      const login = new URL("https://github.com/login/oauth/authorize");
+      login.search = new URLSearchParams({
+        client_id: env.GITHUB_CLIENT_ID,
+        redirect_uri: env.RELAY_ORIGIN + "/github/callback",
+        state,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+      });
+      headers.set("Location", login);
+      return new Response(null, { status: 303, headers });
+    }
+    if (method !== "passphrase" || !(await matches(form.get("passphrase"), env.OWNER_PASSPHRASE))) {
+      return new Response("Invalid owner passphrase. Restart the connection to try again.", { status: 403 });
+    }
+    const approved = await provider.approveConsent(request, String(form.get("handle")));
+    return await approve(provider, approved.request, approved.headers);
+  } catch {
+    return new Response("Authorization failed. Restart the connection from your client.", { status: 400 });
+  }
+}
+
+async function hostRequest(request, env, path) {
+  if (path === hostPrefix + "poll") return relay(env, "/poll", {});
+  if (path !== hostPrefix + "result") return new Response(null, { status: 404 });
+  const raw = await request.text();
+  if (raw.length > 100_000) return new Response(null, { status: 413 });
+  try { return await relay(env, "/result", JSON.parse(raw)); }
+  catch { return new Response(null, { status: 400 }); }
+}
+
 const oauthOptions = {
   apiRoute: "/mcp",
   apiHandler: {
     async fetch(request, env, ctx) {
-      if (new URL(request.url).pathname !== "/mcp") return new Response(null, { status: 404 });
-      if (ctx.props?.owner !== true) return new Response(null, { status: 403 });
+      const path = new URL(request.url).pathname;
       if (request.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
+      if (ctx.props?.owner !== true) return new Response(null, { status: 403 });
+      if (path.startsWith(hostPrefix)) {
+        if (ctx.props.role !== "host") return new Response(null, { status: 403 });
+        return hostRequest(request, env, path);
+      }
+      if (path !== "/mcp") return new Response(null, { status: 404 });
+      if (ctx.props.role === "host") return new Response(null, { status: 403 });
       const raw = await request.text();
       if (raw.length > 16384) return new Response(null, { status: 413 });
       let message;
@@ -61,51 +202,12 @@ const oauthOptions = {
       return rpc(id, await response.json());
     },
   },
-  defaultHandler: {
-    async fetch(request, env) {
-      const url = new URL(request.url);
-      if (url.pathname !== "/authorize") return new Response(null, { status: 404 });
-      try {
-        const provider = env.OAUTH_PROVIDER;
-        if (request.method === "GET") {
-          const auth = await provider.parseAuthRequest(request);
-          const { handle, headers } = await provider.beginConsent(auth);
-          const escape = (value) => String(value).replace(/[&<>"']/g, (char) => (
-            { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
-          ));
-          headers.set("Content-Type", "text/html; charset=utf-8");
-          return new Response(`<!doctype html><meta charset="utf-8"><title>Local Commander</title>
-<h1>Connect Local Commander</h1><p>Allow the client returning to <code>${escape(auth.redirectUri)}</code>
-to check Git status and Python version on your paired machine.</p>
-<form method="post" action="/authorize">
-<input type="hidden" name="handle" value="${escape(handle)}">
-<label>Owner passphrase <input required type="password" name="passphrase" autocomplete="current-password"></label>
-<button type="submit">Allow access</button></form>`, { headers });
-        }
-        if (request.method !== "POST") return new Response(null, { status: 405 });
-        if (request.headers.get("Origin") !== url.origin) return new Response(null, { status: 403 });
-        const form = await request.formData();
-        const proof = await matches(form.get("passphrase"), env.OWNER_PASSPHRASE);
-        if (!proof) return new Response("Invalid owner passphrase. Restart the connection to try again.", { status: 403 });
-        const approved = await provider.approveConsent(request, String(form.get("handle")));
-        const { redirectTo } = await provider.completeAuthorization({
-          request: approved.request,
-          userId: "owner",
-          metadata: {},
-          scope: approved.request.scope,
-          props: { owner: true },
-        });
-        approved.headers.set("Location", redirectTo);
-        return new Response(null, { status: 303, headers: approved.headers });
-      } catch {
-        return new Response("Authorization failed. Restart the connection from your MCP client.", { status: 400 });
-      }
-    },
-  },
+  defaultHandler: { fetch: authorize },
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
-  scopesSupported: ["mcp:read"],
+  scopesSupported: ["mcp:read", hostScope],
+  accessTokenTTL: 3600,
   clientIdMetadataDocumentEnabled: false,
 };
 
@@ -167,23 +269,14 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.origin !== env.RELAY_ORIGIN) return new Response(null, { status: 404 });
-    const path = url.pathname;
-    if (path !== "/host/poll" && path !== "/host/result") {
-      oauth ??= new OAuthProvider({
-        ...oauthOptions,
-        resourceMetadata: { resource: env.RELAY_ORIGIN + "/mcp", authorization_servers: [env.RELAY_ORIGIN] },
-      });
-      return oauth.fetch(request, env, ctx);
-    }
-    if (request.method !== "POST") return new Response(null, { status: 405 });
-    const auth = request.headers.get("Authorization") || "";
-    if (!auth.startsWith("Bearer ") || !(await matches(auth.slice(7), env.HOST_TOKEN))) {
-      return new Response(null, { status: 401 });
-    }
-    if (path === "/host/poll") return relay(env, "/poll", {});
-    const raw = await request.text();
-    if (raw.length > 100_000) return new Response(null, { status: 413 });
-    try { return await relay(env, "/result", JSON.parse(raw)); }
-    catch { return new Response(null, { status: 400 }); }
+    oauth ??= new OAuthProvider({
+      ...oauthOptions,
+      resourceMetadata: {
+        resource: env.RELAY_ORIGIN + "/mcp",
+        authorization_servers: [env.RELAY_ORIGIN],
+      },
+      requiredScopes: ["mcp:read"],
+    });
+    return oauth.fetch(request, env, ctx);
   },
 };
