@@ -76,6 +76,9 @@ The client opens a browser on your computer. Choose **Sign in with GitHub**
 or **Sign in with passphrase**, then return to the terminal. Leave the client running. If you used
 `LOCAL_COMMANDER_INSTALL_DIR`, use the path printed by the installer.
 
+On Android, install the [Termux prerequisites](../README.md#android-with-termux)
+and run the same host-client command from Termux.
+
 ## 3. Connect ChatGPT
 
 In **Plugins → + → Add custom MCP server**, choose the HTTPS connection and
