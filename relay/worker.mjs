@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { OAuthProvider, authorizationErrorRedirect } from "@cloudflare/workers-oauth-provider";
 
-const tools = ["git_status", "python_version"];
+const tools = ["git_status", "python_version", "largest_files"];
 const schema = {
   name: "run_local_tool",
-  description: "Run Git status or check the Python version on the paired machine.",
+  description: "Check Git status, Python version, or the 20 largest files in the paired workspace.",
   inputSchema: {
     type: "object",
     properties: { tool: { type: "string", enum: tools } },
@@ -12,6 +12,18 @@ const schema = {
     additionalProperties: false,
   },
   annotations: { readOnlyHint: true, openWorldHint: false },
+};
+
+const shellSchema = {
+  name: "run_shell_command",
+  description: "Propose a Bash command. The paired computer must approve the exact command before it runs.",
+  inputSchema: {
+    type: "object",
+    properties: { command: { type: "string", minLength: 1, maxLength: 2048 } },
+    required: ["command"],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 };
 
 function json(value, status = 200) {
@@ -112,8 +124,8 @@ async function authorize(request, env) {
       const passphrase = env.OWNER_PASSPHRASE ? `<form method="post" action="/authorize">${hidden}
 <label>Owner passphrase <input required type="password" name="passphrase" autocomplete="current-password"></label>
 <button name="method" value="passphrase">Sign in with passphrase</button></form>` : "";
-      const description = role === "host" ? "Pair this computer to run the two configured tools." :
-        "Allow the requesting client to check Git status and Python version on your paired machine.";
+      const description = role === "host" ? "Pair this computer to run local tools and approve shell commands." :
+        "Allow the requesting client to inspect your paired workspace and propose shell commands for local approval.";
       headers.set("Content-Type", "text/html; charset=utf-8");
       return new Response(`<!doctype html><meta charset="utf-8"><title>Local Commander</title>
 <h1>${role === "host" ? "Pair your computer" : "Connect Local Commander"}</h1>
@@ -192,13 +204,20 @@ const oauthOptions = {
         });
       }
       if (method === "ping") return rpc(id, {});
-      if (method === "tools/list") return rpc(id, { tools: [schema] });
+      if (method === "tools/list") return rpc(id, { tools: [schema, shellSchema] });
       if (method !== "tools/call") return rpc(id, null, -32601, "Method not found");
       const args = params?.arguments;
-      if (params?.name !== schema.name || !args || Object.keys(args).length !== 1 || !tools.includes(args.tool)) {
-        return rpc(id, null, -32602, "Choose git_status or python_version.");
+      if (!args || Object.keys(args).length !== 1) return rpc(id, null, -32602, "Invalid arguments");
+      let job;
+      if (params.name === schema.name && tools.includes(args.tool)) {
+        job = { tool: args.tool };
+      } else if (params.name === shellSchema.name && typeof args.command === "string" &&
+          args.command.length <= 2048 && args.command.trim() && !args.command.includes("\0")) {
+        job = { tool: shellSchema.name, command: args.command };
+      } else {
+        return rpc(id, null, -32602, "Invalid tool or arguments");
       }
-      const response = await relay(env, "/call", { tool: args.tool });
+      const response = await relay(env, "/call", job);
       return rpc(id, await response.json());
     },
   },
@@ -232,15 +251,16 @@ export class Relay extends DurableObject {
   async fetch(request) {
     const { pathname } = new URL(request.url);
     if (pathname === "/call") {
-      const { tool } = await request.json();
+      const payload = await request.json();
       if (this.pending.size >= 4) return json(failure("Local Commander is busy."));
       const id = crypto.randomUUID();
+      const expiresAt = Date.now() + (payload.tool === shellSchema.name ? 70_000 : 25_000);
       const result = await new Promise((resolve) => {
         const timer = setTimeout(() => {
           this.pending.delete(id);
           resolve(failure("The local host did not respond. Check that connect.py is running."));
-        }, 25_000);
-        this.pending.set(id, { tool, resolve, timer, claimed: false });
+        }, expiresAt - Date.now());
+        this.pending.set(id, { payload, resolve, timer, expiresAt, claimed: false });
       });
       return json(result);
     }
@@ -248,7 +268,7 @@ export class Relay extends DurableObject {
       for (const [id, job] of this.pending) {
         if (job.claimed) continue;
         job.claimed = true;
-        return json({ id, tool: job.tool });
+        return json({ id, ...job.payload, remainingMs: Math.max(0, job.expiresAt - Date.now()) });
       }
       return new Response(null, { status: 204 });
     }
