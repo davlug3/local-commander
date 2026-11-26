@@ -169,7 +169,7 @@ function signInPage({ title, description, body, headers = new Headers(), status 
   const nonce = crypto.randomUUID();
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.set("Cache-Control", "no-store");
-  headers.set("Referrer-Policy", "no-referrer");
+  headers.set("Referrer-Policy", "same-origin");
   headers.append("Content-Security-Policy",
     "default-src 'none'; style-src 'nonce-" + nonce + "'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
   return new Response(`<!doctype html>
@@ -246,7 +246,14 @@ async function authorize(request, env) {
       });
     }
     if (request.method !== "POST") return new Response(null, { status: 405 });
-    if (request.headers.get("Origin") !== url.origin) return new Response(null, { status: 403 });
+    if (request.headers.get("Origin") !== url.origin) {
+      return signInPage({
+        title: "Sign-in request rejected",
+        description: "Open a fresh sign-in link from Local Commander and submit the form on this site.",
+        body: "",
+        status: 403,
+      });
+    }
     const form = await request.formData();
     const method = form.get("method");
     if (method === "github" && githubEnabled(env)) {
