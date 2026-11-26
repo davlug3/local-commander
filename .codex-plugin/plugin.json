@@ -1,0 +1,10 @@
+{
+  "name": "local-commander",
+  "version": "0.1.0",
+  "description": "Run owner-configured tools on the local machine via MCP.",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Local Commander",
+    "shortDescription": "Run configured local tools"
+  }
+}
