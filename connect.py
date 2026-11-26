@@ -3,13 +3,14 @@
 import argparse
 import base64
 from hashlib import sha256
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import json
 import os
 import signal
 import shutil
 import subprocess
 import tempfile
+from threading import RLock, Thread
 from uuid import uuid4
 import select
 import secrets
@@ -147,12 +148,108 @@ def tool_result(text, failed=False):
     return {"content": [{"type": "text", "text": text}], "isError": failed}
 
 
+JOB_CONSOLE = """<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Commander · Job console</title>
+<style>
+:root { color-scheme: dark; background: #101918; color: #e5f3ef; font: 16px system-ui, sans-serif; }
+main { max-width: 76rem; margin: 2rem auto; padding: 0 1rem; }
+h1 { font-size: 1.4rem; }
+#state { color: #afe5d1; }
+pre { min-height: 50vh; border: 1px solid #456258; border-radius: .6rem; padding: 1rem;
+      background: #0b1211; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+<main>
+<h1>Local Commander · Job console</h1>
+<p id="state" role="status">Connecting…</p>
+<pre id="output" tabindex="0" aria-label="Command output"></pre>
+</main>
+<script>
+const state = document.querySelector("#state");
+const output = document.querySelector("#output");
+async function refresh() {
+  try {
+    const response = await fetch(location.pathname + "/status", { cache: "no-store" });
+    if (response.status === 404) {
+      state.textContent = "This job is no longer available.";
+      return;
+    }
+    if (!response.ok) throw new Error("Request failed");
+    const result = await response.json();
+    const following = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 24;
+    if (state.textContent !== result.state) state.textContent = result.state;
+    if (output.textContent !== result.output) output.textContent = result.output;
+    if (following) window.scrollTo(0, document.documentElement.scrollHeight);
+    if (result.state !== "Running") return;
+  } catch {
+    state.textContent = "Connection lost. Reconnecting…";
+  }
+  setTimeout(refresh, 1000);
+}
+refresh();
+</script>
+</html>"""
+
+
+def start_job_console(jobs):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            host = f"127.0.0.1:{self.server.server_port}"
+            parts = self.path.split("/")
+            if (self.headers.get("Host") != host or len(parts) not in (3, 4)
+                    or parts[:2] != ["", "jobs"] or (len(parts) == 4 and parts[3] != "status")):
+                self.send_error(404)
+                return
+            result = jobs.snapshot(parts[2])
+            if result is None:
+                self.send_error(404)
+                return
+            if len(parts) == 4:
+                state, output, _ = result
+                body = json.dumps({"state": state, "output": output})
+                content_type = "application/json"
+            else:
+                body = JOB_CONSOLE
+                content_type = "text/html; charset=utf-8"
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy",
+                             "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                             "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+            self.end_headers()
+            self.wfile.write(payload)
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    except OSError:
+        terminal_message("Live job console unavailable", "Could not open a localhost port.", color="33")
+        return None
+    Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
 class ShellJobs:
     def __init__(self):
         self.jobs = {}
         self.reported = set()
+        self.lock = RLock()
+        self.console = None
 
     def start(self, argv):
+        with self.lock:
+            return self.start_job(argv)
+
+    def start_job(self, argv):
         if len(self.jobs) >= 16:
             for job_id, (process, output) in self.jobs.items():
                 if process.poll() is not None:
@@ -174,19 +271,32 @@ class ShellJobs:
             return tool_result(f"Could not start background command: {error}", True)
         job_id = uuid4().hex
         self.jobs[job_id] = (process, output)
-        terminal_message("Background job started", f"Job ID: {job_id}", color="32")
+        details = [f"Job ID: {job_id}"]
+        if self.console:
+            details.extend(("", f"Live console: http://127.0.0.1:{self.console.server_port}/jobs/{job_id}"))
+        terminal_message("Background job started", *details, color="32")
         return tool_result(f"Background job started. Job ID: {job_id}")
 
-    def status(self, job_id):
-        if not isinstance(job_id, str) or job_id not in self.jobs:
-            return tool_result("Unknown background job in this client session.", True)
-        process, output = self.jobs[job_id]
-        code = process.poll()
-        size = os.fstat(output.fileno()).st_size
-        tail = os.pread(output.fileno(), 8192, max(0, size - 8192))
+    def snapshot(self, job_id):
+        with self.lock:
+            if not isinstance(job_id, str) or job_id not in self.jobs:
+                return None
+            process, output = self.jobs[job_id]
+            code = process.poll()
+            size = os.fstat(output.fileno()).st_size
+            tail = os.pread(output.fileno(), 8192, max(0, size - 8192))
         summary = "Running" if code is None else f"Finished with exit code {code}"
-        prefix = "\n[Showing the last 8192 bytes]\n" if size > 8192 else "\n"
-        return tool_result(summary + prefix + tail.decode("utf-8", errors="replace"), code not in (None, 0))
+        text = tail.decode("utf-8", errors="replace")
+        if size > 8192:
+            text = "[Showing the last 8192 bytes]\n" + text
+        return summary, text, code not in (None, 0)
+
+    def status(self, job_id):
+        result = self.snapshot(job_id)
+        if result is None:
+            return tool_result("Unknown background job in this client session.", True)
+        summary, output, failed = result
+        return tool_result(summary + "\n" + output, failed)
 
     def report_completed(self):
         for job_id, (process, _) in self.jobs.items():
@@ -195,6 +305,13 @@ class ShellJobs:
                 self.reported.add(job_id)
 
     def close(self):
+        if self.console:
+            self.console.shutdown()
+            self.console.server_close()
+        with self.lock:
+            self.close_jobs()
+
+    def close_jobs(self):
         for process, output in self.jobs.values():
             if process.poll() is None:
                 try:
@@ -203,6 +320,7 @@ class ShellJobs:
                     pass
                 process.wait()
             output.close()
+        self.jobs.clear()
 
 
 def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False, jobs=None):
@@ -297,6 +415,8 @@ def main():
     terminal_message("Signed in. Polling for tools", f"Relay: {origin}",
                      f"Workspace: {json.dumps(str(WORKSPACE))}", "Press Ctrl-C to stop.", color="32")
     jobs = ShellJobs()
+    if args.allow_shell:
+        jobs.console = start_job_console(jobs)
     try:
         return poll(oauth, tokens, args, session_approvals, jobs)
     finally:
