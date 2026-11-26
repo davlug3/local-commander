@@ -95,3 +95,12 @@ A one-run request always asks for local confirmation.
 
 Bash runs as your current user, with the workspace as its starting directory.
 Commands have a 15-second execution timeout and an 8 KiB output limit.
+
+### Approve all session commands
+
+Start the client with both `--allow-shell` and `--approve-all-session` and
+enter the startup confirmation in your terminal. After sign-in, any OAuth
+client authorized to invoke shell tools on this relay can run any valid Bash
+command with `permission: session` without another terminal prompt, until
+you stop the client. Explicitly request session approval in ChatGPT.
+One-time requests still prompt. This setting is not saved.
