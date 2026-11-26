@@ -86,10 +86,10 @@ server is also available for local Codex and OpenAI Secure MCP Tunnel.
 
 ## Shell commands
 
-Start `connect.py` with `--allow-shell` to enable Bash requests. ChatGPT asks
-whether you want to approve one run or repeated runs of the exact command
-during this client session. The terminal shows the command and workspace
-and asks for a confirmation phrase before granting either permission.
+Start `connect.py` with `--allow-shell` to enable Bash requests. When ChatGPT
+omits the permission and blanket approval is off, the host requests one-time
+approval. You can explicitly request session approval for repeat runs of the
+exact command. The terminal shows the command and workspace before approval.
 Session approvals are kept in memory and clear on client exit or token renewal.
 A one-run request always asks for local confirmation.
 
@@ -101,6 +101,7 @@ Commands have a 15-second execution timeout and an 8 KiB output limit.
 Start the client with both `--allow-shell` and `--approve-all-session` and
 enter the startup confirmation in your terminal. After sign-in, any OAuth
 client authorized to invoke shell tools on this relay can run any valid Bash
-command with `permission: session` without another terminal prompt, until
-you stop the client. Explicitly request session approval in ChatGPT.
-One-time requests still prompt. This setting is not saved.
+command without another prompt when the request uses the host default or
+explicitly requests session approval. The terminal still displays each command.
+Explicit one-time requests always prompt. This setting clears when you stop the
+client.
