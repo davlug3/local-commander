@@ -42,7 +42,7 @@ On the computer that should run the tools:
 curl -fsSL https://raw.githubusercontent.com/davlug3/local-commander/main/install.sh | bash
 cd /path/to/your/project
 python3 "${XDG_DATA_HOME:-$HOME/.local/share}/local-commander/connect.py" \
-  https://local-commander.YOUR-SUBDOMAIN.workers.dev
+  https://local-commander.davlug3.workers.dev
 ```
 
 Enter the `HOST_TOKEN` at the prompt. Leave the client running. If you used
