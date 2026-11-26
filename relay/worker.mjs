@@ -126,13 +126,22 @@ async function githubCallback(provider, request, env, setStage) {
     if (known.includes(error)) setStage("github-token-exchange/" + error);
     throw new Error("GitHub token exchange failed.");
   }
-  setStage("github-user-lookup");
+  setStage("github-user-lookup/request-failed");
   const user = await fetch("https://api.github.com/user", {
-    headers: { Authorization: "Bearer " + access_token, "User-Agent": "LocalCommander", Accept: "application/vnd.github+json" },
-    redirect: "error",
+    method: "GET",
+    headers: {
+      Authorization: "Bearer " + access_token,
+      "User-Agent": "LocalCommander",
+      Accept: "application/vnd.github+json",
+    },
+    redirect: "manual",
+    signal: AbortSignal.timeout(12_000),
   });
+  setStage("github-user-lookup/http-" + user.status);
   if (!user.ok) throw new Error("GitHub user lookup failed.");
-  if (String((await user.json()).id) !== String(env.GITHUB_OWNER_ID)) {
+  const profile = await user.json();
+  if (!Number.isSafeInteger(profile.id)) throw new Error("GitHub user ID missing.");
+  if (String(profile.id) !== String(env.GITHUB_OWNER_ID)) {
     setStage("github-owner-mismatch");
     throw new Error("GitHub owner verification failed.");
   }
