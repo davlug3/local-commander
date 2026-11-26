@@ -40,6 +40,20 @@ python3 "${XDG_DATA_HOME:-$HOME/.local/share}/local-commander/connect.py" \
 
 Enter the startup confirmation in your terminal, then sign in.
 
+## Android with Termux
+
+Install the prerequisites from the Termux terminal:
+
+```bash
+pkg install bash python curl git
+curl -fsSL https://raw.githubusercontent.com/davlug3/local-commander/main/install.sh | bash
+```
+
+Run the same `connect.py` command from your project directory in Termux.
+The client opens the sign-in link with `termux-open-url`. If the browser
+doesn't open, copy the printed URL into a browser on the same phone.
+Keep the Termux session running while you use the plugin.
+
 ## Local Codex or another stdio MCP client
 
 Unzip this package on your machine. In Codex, register the local server with
