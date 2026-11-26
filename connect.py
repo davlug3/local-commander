@@ -23,6 +23,14 @@ import webbrowser
 from server import DEFAULT_COMMANDS, WORKSPACE, run_command
 
 
+def terminal_message(title, *lines, color="36"):
+    stream = sys.stderr
+    colored = stream.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+    heading = f"\x1b[1;{color}m{title}\x1b[0m" if colored else title
+    divider = "-" * 40
+    print("\n" + heading, divider, *lines, divider, sep="\n", file=stream, flush=True)
+
+
 class NoRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -102,7 +110,7 @@ class OAuth:
                 "response_type": "code", "scope": "host:connect", "state": state,
                 "code_challenge": challenge, "code_challenge_method": "S256",
             })
-            print("Open this URL in a browser on this computer:", login, file=sys.stderr)
+            terminal_message("Local Commander | Sign in", "Open this URL on this device:", login)
             open_sign_in_browser(login)
             deadline = time.monotonic() + 300
             while not callback and time.monotonic() < deadline:
@@ -153,6 +161,7 @@ class ShellJobs:
             return tool_result(f"Could not start background command: {error}", True)
         job_id = uuid4().hex
         self.jobs[job_id] = (process, output)
+        terminal_message("Background job started", f"Job ID: {job_id}", color="32")
         return tool_result(f"Background job started. Job ID: {job_id}")
 
     def status(self, job_id):
@@ -206,17 +215,18 @@ def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False
             return tool_result("Bash was not found on the host PATH.", True)
         argv = [bash, "--noprofile", "--norc", "-c", command]
         if permission == "session" and (approve_all or command in session_approvals):
-            print(f"Running approved shell command in {json.dumps(str(WORKSPACE))}: "
-                  f"{json.dumps(command)}", file=sys.stderr, flush=True)
+            terminal_message("Running approved shell command",
+                             f"Mode: {mode}", f"Workspace: {json.dumps(str(WORKSPACE))}",
+                             f"Command: {json.dumps(command)}", color="32")
             return execute(argv)
         approval = "yes " + secrets.token_hex(3)
         scope = "once" if permission == "once" else "this exact command for the current session"
         try:
             with open("/dev/tty", encoding="utf-8") as terminal:
-                print(f"\nLocal Commander {mode} shell request in {json.dumps(str(WORKSPACE))}\n"
-                      f"{json.dumps(command)}\n"
-                      f"Type {approval} to approve {scope} and share the output: ",
-                      file=sys.stderr, flush=True)
+                terminal_message("Shell approval required", f"Mode: {mode}",
+                                 f"Workspace: {json.dumps(str(WORKSPACE))}",
+                                 f"Command: {json.dumps(command)}", "",
+                                 f"Type {approval} to approve {scope} and share the output.", color="33")
                 ready, _, _ = select.select([terminal], [], [], max(0, min(wait, deadline - time.monotonic())))
                 if not ready or terminal.readline().strip() != approval or time.monotonic() >= deadline:
                     return tool_result("Command denied or approval expired.", True)
@@ -237,11 +247,11 @@ def confirm_session_shell(origin):
     phrase = "approve all " + secrets.token_hex(3)
     try:
         with open("/dev/tty", encoding="utf-8") as terminal:
-            print(f"Session-wide shell access for {origin}\n"
-                  f"Starting directory: {json.dumps(str(WORKSPACE))}\n"
-                  "Authorized clients can run any Bash command as your user using the host default or session approval "
-                  "until you stop this client.\n"
-                  f"Type {phrase} to enable it: ", file=sys.stderr, flush=True)
+            terminal_message("Session-wide shell approval", f"Relay: {origin}",
+                             f"Workspace: {json.dumps(str(WORKSPACE))}", "",
+                             "Authorized clients can run any Bash command as your user using",
+                             "the host default or session approval until you stop this client.", "",
+                             f"Type {phrase} to enable it.", color="33")
             return terminal.readline().strip() == phrase
     except OSError:
         return False
@@ -265,7 +275,8 @@ def main():
         sys.exit("Session-wide shell access was not approved.")
     tokens = oauth.sign_in()
     session_approvals = set()
-    print(f"Signed in. Polling {origin} for tools in {WORKSPACE}. Press Ctrl-C to stop.", file=sys.stderr)
+    terminal_message("Signed in. Polling for tools", f"Relay: {origin}",
+                     f"Workspace: {json.dumps(str(WORKSPACE))}", "Press Ctrl-C to stop.", color="32")
     jobs = ShellJobs()
     try:
         return poll(oauth, tokens, args, session_approvals, jobs)
@@ -292,9 +303,9 @@ def poll(oauth, tokens, args, session_approvals, jobs):
                 continue
             if error.code in {403, 404}:
                 raise
-            print(f"Relay request failed: {error}", file=sys.stderr)
+            terminal_message("Relay request failed", json.dumps(str(error)), color="31")
         except (ValueError, KeyError, URLError, TimeoutError) as error:
-            print(f"Relay request failed: {error}", file=sys.stderr)
+            terminal_message("Relay request failed", json.dumps(str(error)), color="31")
         time.sleep(5)
 
 
