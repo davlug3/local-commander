@@ -55,9 +55,6 @@ with `python3 /absolute/path/to/local-commander/server.py` as the MCP command.
 Connect the tunnel in the app configuration and keep the client running while
 ChatGPT uses it.
 
-## Cloudflare option
+## Cloudflare relay
 
-Workers Free can host an HTTPS relay. For ChatGPT, that route needs a remote
-MCP HTTP endpoint with compatible authentication and a way to reach the local
-runner, such as Cloudflare Tunnel. This package implements the local stdio
-server. The OpenAI tunnel option above uses that server directly.
+To use ChatGPT over a Cloudflare Worker with the custom Python host client, follow the [Cloudflare relay setup](relay/README.md).
