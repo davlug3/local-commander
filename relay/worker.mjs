@@ -171,7 +171,7 @@ function signInPage({ title, description, body, headers = new Headers(), status 
   headers.set("Cache-Control", "no-store");
   headers.set("Referrer-Policy", "same-origin");
   headers.append("Content-Security-Policy",
-    "default-src 'none'; style-src 'nonce-" + nonce + "'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    "default-src 'none'; style-src 'nonce-" + nonce + "'; base-uri 'none'; frame-ancestors 'none'");
   return new Response(`<!doctype html>
 <html lang="en">
 <head>
@@ -280,7 +280,26 @@ async function authorize(request, env) {
     }
     const approved = await provider.approveConsent(request, String(form.get("handle")));
     return await approve(provider, approved.request, approved.headers);
-  } catch {
+  } catch (error) {
+    const consentErrors = {
+      "Missing transaction handle": "missing-handle",
+      "This authorization was not started in this browser; start again": "missing-browser-cookie",
+      "This authorization belongs to a different browser session; start again": "browser-cookie-mismatch",
+      "This authorization expired or was already used; start again": "expired-or-used",
+    };
+    const detail = error?.description;
+    if (stage === "github-consent" && Object.hasOwn(consentErrors, detail)) {
+      const reason = consentErrors[detail];
+      const description = reason.includes("cookie")
+        ? "Restart the connection and open the new link in the same browser with cookies enabled."
+        : "Restart the connection and submit the new sign-in form once.";
+      return signInPage({
+        title: "Sign-in could not continue",
+        description,
+        body: "<code>github-consent/" + reason + "</code>",
+        status: 400,
+      });
+    }
     return new Response(`Authorization failed (${stage}). Restart the connection from your client.`, {
       status: 400, headers: { "Cache-Control": "no-store" },
     });
