@@ -3,6 +3,14 @@
 Requires Python 3 on the machine that will run commands. Git is optional unless
 you use the built-in Git status tool. The server communicates over MCP stdio.
 
+## Install on the local host
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/davlug3/local-commander/main/install.sh | bash
+```
+
+The installer prints the Python command to configure in OpenAI’s tunnel client.
+
 ## Local Codex or another stdio MCP client
 
 Unzip this package on your machine. In Codex, register the local server with
