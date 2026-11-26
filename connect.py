@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 import signal
+import shutil
 import subprocess
 import tempfile
 from uuid import uuid4
@@ -25,6 +26,21 @@ from server import DEFAULT_COMMANDS, WORKSPACE, run_command
 class NoRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def open_sign_in_browser(url):
+    termux_opener = shutil.which("termux-open-url")
+    if termux_opener:
+        try:
+            result = subprocess.run([termux_opener, url], check=False, timeout=5)
+            if result.returncode == 0:
+                return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        webbrowser.open(url)
+    except webbrowser.Error:
+        pass
 
 
 class OAuth:
@@ -87,7 +103,7 @@ class OAuth:
                 "code_challenge": challenge, "code_challenge_method": "S256",
             })
             print("Open this URL in a browser on this computer:", login, file=sys.stderr)
-            webbrowser.open(login)
+            open_sign_in_browser(login)
             deadline = time.monotonic() + 300
             while not callback and time.monotonic() < deadline:
                 listener.handle_request()
@@ -185,7 +201,10 @@ def run_job(job, allow_shell, poll_started, session_approvals, approve_all=False
         wait = min(40, deadline - time.monotonic())
         if wait <= 0:
             return tool_result("Command approval expired.", True)
-        argv = ["/bin/bash", "--noprofile", "--norc", "-c", command]
+        bash = shutil.which("bash")
+        if not bash:
+            return tool_result("Bash was not found on the host PATH.", True)
+        argv = [bash, "--noprofile", "--norc", "-c", command]
         if permission == "session" and (approve_all or command in session_approvals):
             print(f"Running approved shell command in {json.dumps(str(WORKSPACE))}: "
                   f"{json.dumps(command)}", file=sys.stderr, flush=True)
