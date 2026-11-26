@@ -165,6 +165,55 @@ async function githubCallback(provider, request, env, setStage) {
   return approve(provider, auth, headers);
 }
 
+function signInPage({ title, description, body, headers = new Headers(), status = 200 }) {
+  const nonce = crypto.randomUUID();
+  headers.set("Content-Type", "text/html; charset=utf-8");
+  headers.set("Cache-Control", "no-store");
+  headers.set("Referrer-Policy", "no-referrer");
+  headers.append("Content-Security-Policy",
+    "default-src 'none'; style-src 'nonce-" + nonce + "'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+  return new Response(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)} · Local Commander</title>
+<style nonce="${nonce}">
+:root{color-scheme:dark;font:16px/1.5 system-ui,sans-serif;background:#0d1414;color:#eaf4f0}
+*{box-sizing:border-box}
+body{min-height:100vh;min-height:100svh;margin:0;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 50% 10%,#223b35,transparent 62%)}
+main{width:min(100%,440px);padding:clamp(22px,6vw,36px);border:1px solid #36504b;border-radius:20px;background:#141e1d;box-shadow:0 24px 64px #0005}
+.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:.875rem;color:#c5e4d8}
+.mark{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;background:#28483f;color:#bbf4d7;font:700 15px ui-monospace,monospace}
+h1{margin:20px 0 8px;font-size:clamp(1.65rem,5vw,2.2rem);line-height:1.15;letter-spacing:-.035em}
+p{margin:0 0 20px;color:#abc0b8}
+form{display:grid;gap:10px;margin:0}
+button,input{width:100%;min-height:46px;border-radius:9px;font:inherit}
+button{padding:10px 14px;border:1px solid #58736a;background:#253832;color:#ecf9f3;font-weight:650;cursor:pointer}
+button:hover{background:#304941}
+button.primary{border-color:#a5e8cb;background:#a5e8cb;color:#10251d}
+button.primary:hover{background:#b9f3db}
+input{padding:10px 12px;border:1px solid #58736a;background:#101817;color:#eaf4f0}
+label{font-size:.875rem;font-weight:600}
+:focus-visible{outline:3px solid #bbf4d7;outline-offset:3px}
+.separator{display:flex;align-items:center;gap:12px;margin:17px 0;color:#abc0b8;font-size:.8rem}
+.separator::before,.separator::after{content:"";height:1px;flex:1;background:#36504b}
+details{margin-top:22px;padding-top:14px;border-top:1px solid #36504b;color:#abc0b8;font-size:.8rem}
+summary{cursor:pointer}
+code{display:block;margin-top:8px;overflow-wrap:anywhere;color:#eaf4f0}
+</style>
+</head>
+<body>
+<main>
+<div class="brand"><span class="mark" aria-hidden="true">&gt;_</span>Local Commander</div>
+<h1>${escapeHtml(title)}</h1>
+<p>${escapeHtml(description)}</p>
+${body}
+</main>
+</body>
+</html>`, { status, headers });
+}
+
 async function authorize(request, env) {
   const url = new URL(request.url);
   const provider = env.OAUTH_PROVIDER;
@@ -180,17 +229,21 @@ async function authorize(request, env) {
       const { handle, headers } = await provider.beginConsent(auth);
       const hidden = `<input type="hidden" name="handle" value="${escapeHtml(handle)}">`;
       const github = githubEnabled(env) ? `<form method="post" action="/authorize">${hidden}
-<button name="method" value="github">Sign in with GitHub</button></form>` : "";
+<button class="primary" type="submit" name="method" value="github">Sign in with GitHub</button></form>` : "";
       const passphrase = env.OWNER_PASSPHRASE ? `<form method="post" action="/authorize">${hidden}
-<label>Owner passphrase <input required type="password" name="passphrase" autocomplete="current-password"></label>
-<button name="method" value="passphrase">Sign in with passphrase</button></form>` : "";
-      const description = role === "host" ? "Pair this computer to run local tools and approve shell commands." :
-        "Allow the requesting client to inspect your paired workspace and propose shell commands for local approval.";
-      headers.set("Content-Type", "text/html; charset=utf-8");
-      return new Response(`<!doctype html><meta charset="utf-8"><title>Local Commander</title>
-<h1>${role === "host" ? "Pair your computer" : "Connect Local Commander"}</h1>
-<p>${description}</p><p>Callback <code>${escapeHtml(auth.redirectUri)}</code></p>
-${github}${passphrase}`, { headers });
+<label for="passphrase">Owner passphrase</label>
+<input id="passphrase" required type="password" name="passphrase" autocomplete="current-password">
+<button type="submit" name="method" value="passphrase">Sign in with passphrase</button></form>` : "";
+      const separator = github && passphrase ? '<div class="separator">or</div>' : "";
+      const methods = github || passphrase ? github + separator + passphrase : "<p>Ask the relay owner to configure a sign-in method.</p>";
+      return signInPage({
+        title: role === "host" ? "Pair your computer" : "Connect Local Commander",
+        description: role === "host" ? "Sign in to pair this computer with your relay." :
+          "Sign in to let this client request tools on your paired computer.",
+        body: methods + `<details><summary>Connection details</summary>
+<code>${escapeHtml(auth.redirectUri)}</code></details>`,
+        headers,
+      });
     }
     if (request.method !== "POST") return new Response(null, { status: 405 });
     if (request.headers.get("Origin") !== url.origin) return new Response(null, { status: 403 });
@@ -216,7 +269,7 @@ ${github}${passphrase}`, { headers });
       return new Response(null, { status: 303, headers });
     }
     if (method !== "passphrase" || !(await matches(form.get("passphrase"), env.OWNER_PASSPHRASE))) {
-      return new Response("Invalid owner passphrase. Restart the connection to try again.", { status: 403 });
+      return signInPage({ title: "Sign-in failed", description: "The owner passphrase was incorrect. Restart the connection to try again.", body: "", status: 403 });
     }
     const approved = await provider.approveConsent(request, String(form.get("handle")));
     return await approve(provider, approved.request, approved.headers);
