@@ -31,6 +31,16 @@ def terminal_message(title, *lines, color="36"):
     print("\n" + heading, divider, *lines, divider, sep="\n", file=stream, flush=True)
 
 
+def terminal_result(title, result, *details):
+    text = result["content"][0]["text"]
+    safe_text = "".join(
+        char if char.isprintable() or char in "\n\t" else ascii(char)[1:-1]
+        for char in text
+    )
+    terminal_message(title, *details, "", safe_text.rstrip("\n") or "(No output)",
+                     color="31" if result["isError"] else "32")
+
+
 class NoRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -140,12 +150,15 @@ def tool_result(text, failed=False):
 class ShellJobs:
     def __init__(self):
         self.jobs = {}
+        self.reported = set()
 
     def start(self, argv):
         if len(self.jobs) >= 16:
             for job_id, (process, output) in self.jobs.items():
                 if process.poll() is not None:
+                    self.report_completed()
                     output.close()
+                    self.reported.discard(job_id)
                     del self.jobs[job_id]
                     break
             else:
@@ -174,6 +187,12 @@ class ShellJobs:
         summary = "Running" if code is None else f"Finished with exit code {code}"
         prefix = "\n[Showing the last 8192 bytes]\n" if size > 8192 else "\n"
         return tool_result(summary + prefix + tail.decode("utf-8", errors="replace"), code not in (None, 0))
+
+    def report_completed(self):
+        for job_id, (process, _) in self.jobs.items():
+            if job_id not in self.reported and process.poll() is not None:
+                terminal_result("Background job finished", self.status(job_id), f"Job ID: {job_id}")
+                self.reported.add(job_id)
 
     def close(self):
         for process, output in self.jobs.values():
@@ -287,10 +306,15 @@ def main():
 def poll(oauth, tokens, args, session_approvals, jobs):
     while True:
         try:
+            jobs.report_completed()
             poll_started = time.monotonic()
             job = oauth.post("/mcp/host/poll", {}, tokens["access_token"])
             if job:
                 result = run_job(job, args.allow_shell, poll_started, session_approvals, args.approve_all_session, jobs)
+                if job.get("tool") != "get_shell_job_status" and (
+                    job.get("mode") != "background" or result["isError"]
+                ):
+                    terminal_result("Command result", result)
                 oauth.post("/mcp/host/result", {
                     "id": job["id"],
                     "text": result["content"][0]["text"],
