@@ -8,6 +8,7 @@ import json
 import os
 import re
 import signal
+import socket
 import shutil
 import subprocess
 import tempfile
@@ -397,14 +398,20 @@ def confirm_session_shell(origin):
         return False
 
 
+def hostname_device():
+    return re.sub(r"[^a-z0-9-]+", "-", socket.gethostname().lower()).lstrip("-")[:32].rstrip("-")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("relay", help="Origin of your Cloudflare Worker")
-    parser.add_argument("--device", default="default", help="Unique device name (lowercase letters, digits and hyphens)")
+    parser.add_argument("--device", help="Unique device name (defaults to the computer hostname)")
     parser.add_argument("--allow-shell", action="store_true", help="Enable shell requests with local approval")
     parser.add_argument("--approve-all-session", action="store_true",
                         help="Confirm once locally to approve commands using the host default or session approval until this client exits")
     args = parser.parse_args()
+    if args.device is None:
+        args.device = hostname_device()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", args.device):
         parser.error("--device must start with a lowercase letter or digit and contain at most 32 letters, digits or hyphens")
     if args.approve_all_session and not args.allow_shell:
