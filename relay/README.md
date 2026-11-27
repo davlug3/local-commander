@@ -167,3 +167,15 @@ in on each device. To route a tool call, specify its name in ChatGPT, for
 example “Run pwd on device laptop.” Use that same device for background-job
 status. Tool calls without a device still route to the legacy `default` queue. Start
 one client with `--device default` if you want to keep that behavior.
+
+## Dashboards
+
+The host prints a **Local dashboard** URL after sign-in. It shows that device's
+workspace and background jobs, with links to live output. Open it on the same
+device.
+
+Open your Worker origin with `/dashboard` appended for the remote dashboard.
+Sign in with an existing Worker sign-in method to view device names and their
+last check-in. A host is marked offline after 90 seconds without a check-in.
+Update and restart each client to enable reporting. Job output stays on the
+local dashboard. The remote dashboard has no shell execution controls.
