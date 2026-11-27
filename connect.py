@@ -174,21 +174,54 @@ def tool_result(text, failed=False):
     return {"content": [{"type": "text", "text": text}], "isError": failed}
 
 
+UI_STYLES = """:root{color-scheme:dark;--bg:#0f172a;--card:#1b2336;--ink:#f8fafc;--muted:#a8b7ca;--edge:#475569;--accent:#86efac;font:16px/1.55 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;padding:clamp(16px,4vw,48px);background:radial-gradient(ellipse at 70% 0,#1c3c43,transparent 55%),var(--bg)}
+main{width:min(100%,68rem);margin:clamp(16px,6vh,70px) auto;padding:clamp(19px,4vw,40px);border:1px solid var(--edge);border-radius:22px;background:var(--card);box-shadow:0 24px 68px #0004}
+body.auth{display:grid;place-items:center}
+.auth main{max-width:30rem;margin:0}
+.brand{display:flex;align-items:center;gap:11px;color:var(--muted);font-weight:650;font-size:.9rem}
+.mark{display:grid;place-items:center;width:36px;height:36px;border:1px solid #467061;border-radius:10px;background:#173936;color:var(--accent);font:700 .95rem ui-monospace,monospace}
+h1{font-size:clamp(1.65rem,4.5vw,2.45rem);line-height:1.12;letter-spacing:-.035em;margin:20px 0 8px}
+h2{font-size:1.1rem;margin:24px 0 8px}
+p{color:var(--muted);margin:0 0 17px;overflow-wrap:anywhere}
+form{display:grid;gap:10px;margin:0}
+label{font-size:.9rem;font-weight:650}
+button,input,textarea{font:inherit;border-radius:10px;min-height:46px}
+button,input{padding:9px 13px}
+input,textarea,pre{background:#10192b;color:var(--ink);border:1px solid var(--edge)}
+input,textarea{width:100%;min-width:0}
+textarea{padding:12px;font-family:ui-monospace,monospace;resize:vertical;overflow-wrap:anywhere}
+button{cursor:pointer;background:#26354a;color:var(--ink);border:1px solid var(--edge);font-weight:650}
+button:hover{background:#33465d}
+button:disabled{opacity:.65;cursor:wait}
+button.primary,#sign-in,#copy{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+button.primary:hover,#sign-in:hover,#copy:hover{background:#bbf7d0}
+#copy{margin-top:10px;width:100%}
+a{color:var(--accent);overflow-wrap:anywhere}
+:focus-visible{outline:3px solid #fff;outline-offset:3px}
+.separator{display:flex;align-items:center;gap:12px;margin:18px 0;color:var(--muted);font-size:.87rem}
+.separator::before,.separator::after{content:"";height:1px;flex:1;background:var(--edge)}
+details{border-top:1px solid var(--edge);padding-top:13px;margin-top:22px;color:var(--muted);font-size:.9rem}
+summary{cursor:pointer;min-height:44px;display:list-item;padding:9px 0}
+code{display:block;overflow-wrap:anywhere}
+ul{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:9px}
+li{padding:12px 14px;border-radius:11px;background:#10192b;border:1px solid var(--edge);overflow-wrap:anywhere}
+li a{display:inline-flex;align-items:center;min-height:44px;margin:-9px 8px -9px 0}
+pre{font: .88rem/1.55 ui-monospace,monospace;padding:clamp(12px,3vw,24px);min-height:48vh;border-radius:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+#state{color:var(--accent)}
+#device,#workspace{font-family:ui-monospace,monospace}
+[hidden]{display:none!important}"""
+
 JOB_CONSOLE = """<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Local Commander · Job console</title>
-<style>
-:root { color-scheme: dark; background: #101918; color: #e5f3ef; font: 16px system-ui, sans-serif; }
-main { max-width: 76rem; margin: 2rem auto; padding: 0 1rem; }
-h1 { font-size: 1.4rem; }
-#state { color: #afe5d1; }
-pre { min-height: 50vh; border: 1px solid #456258; border-radius: .6rem; padding: 1rem;
-      background: #0b1211; white-space: pre-wrap; overflow-wrap: anywhere; }
-</style>
-<main>
-<h1>Local Commander · Job console</h1>
+<style>__LC_UI_STYLES__</style>
+<body><main>
+<div class="brand"><span class="mark" aria-hidden="true">&gt;_</span>Local Commander</div>
+<h1>Job console</h1>
 <p id="state" role="status">Connecting…</p>
 <pre id="output" tabindex="0" aria-label="Command output"></pre>
 </main>
@@ -216,16 +249,12 @@ async function refresh() {
 }
 refresh();
 </script>
-</html>"""
+</html>""".replace("__LC_UI_STYLES__", UI_STYLES)
 
 
 DASHBOARD = """<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Local Commander dashboard</title><style>
-:root{color-scheme:dark;background:#101918;color:#e5f3ef;font:16px system-ui}
-main{max-width:58rem;margin:3rem auto;padding:0 1rem}
-a{color:#9de9cd;overflow-wrap:anywhere} li{padding:.6rem} p{overflow-wrap:anywhere}
-</style><main><h1>Local Commander</h1><p id="device"></p><p id="workspace"></p>
+<title>Local Commander dashboard</title><style>__LC_UI_STYLES__</style><body><main><div class="brand"><span class="mark" aria-hidden="true">&gt;_</span>Local Commander</div><h1>Local dashboard</h1><p id="device"></p><p id="workspace"></p>
 <h2>Background jobs</h2><p id="status" role="status">Connecting…</p><ul id="jobs"></ul></main>
 <script>
 let previous = "";
@@ -255,7 +284,7 @@ async function refresh() {
   setTimeout(refresh, 1000);
 }
 refresh();
-</script></html>"""
+</script></html>""".replace("__LC_UI_STYLES__", UI_STYLES)
 
 
 def start_job_console(jobs, device="default"):
