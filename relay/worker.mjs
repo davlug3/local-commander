@@ -40,6 +40,13 @@ const shellSchema = {
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 };
 
+const listDevicesSchema = {
+  name: "list_devices",
+  description: "List Local Commander devices with online status and last check-in.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  annotations: { readOnlyHint: true },
+};
+
 const jobStatusSchema = {
   name: "get_shell_job_status",
   description: "Check a background shell job by ID on the same device that started it. Returns its current status, final exit code when available, and recent output.",
@@ -376,9 +383,18 @@ const oauthOptions = {
         });
       }
       if (method === "ping") return rpc(id, {});
-      if (method === "tools/list") return rpc(id, { tools: [schema, shellSchema, jobStatusSchema] });
+      if (method === "tools/list") return rpc(id, { tools: [schema, shellSchema, jobStatusSchema, listDevicesSchema] });
       if (method !== "tools/call") return rpc(id, null, -32601, "Method not found");
-      const args = params?.arguments;
+      const args = params?.arguments ?? {};
+      if (params?.name === listDevicesSchema.name && typeof args === "object" &&
+          !Array.isArray(args) && Object.keys(args).length === 0) {
+        const registry = await relay(env, "/devices", {}, "@dashboard");
+        const { devices } = await registry.json();
+        const now = Date.now();
+        const rows = devices.map(({ name, lastSeen }) =>
+          name + " · " + (now - lastSeen < 90_000 ? "Online" : "Offline") + " · " + new Date(lastSeen).toISOString());
+        return rpc(id, { content: [{ type: "text", text: rows.join("\n") || "No devices have checked in yet." }] });
+      }
       if (!args || typeof args !== "object" || Array.isArray(args)) return rpc(id, null, -32602, "Invalid arguments");
       const { device = "default", ...toolArgs } = args;
       if (typeof device !== "string" || !devicePattern.test(device)) {
