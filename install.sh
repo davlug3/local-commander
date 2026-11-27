@@ -203,8 +203,10 @@ class OAuth:
         self.resource = origin + "/mcp"
         self.opener = build_opener(NoRedirects())
 
-    def post(self, path, data, access_token=None, form=False):
+    def post(self, path, data, access_token=None, form=False, heartbeat=False):
         headers = {"User-Agent": "LocalCommander/0.3", "Accept": "application/json"}
+        if heartbeat:
+            headers["X-Local-Commander-Heartbeat"] = "1"
         if access_token:
             headers["Authorization"] = "Bearer " + access_token
         if form:
@@ -329,7 +331,47 @@ refresh();
 </html>"""
 
 
-def start_job_console(jobs):
+DASHBOARD = """<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Commander dashboard</title><style>
+:root{color-scheme:dark;background:#101918;color:#e5f3ef;font:16px system-ui}
+main{max-width:58rem;margin:3rem auto;padding:0 1rem}
+a{color:#9de9cd;overflow-wrap:anywhere} li{padding:.6rem} p{overflow-wrap:anywhere}
+</style><main><h1>Local Commander</h1><p id="device"></p><p id="workspace"></p>
+<h2>Background jobs</h2><p id="status" role="status">Connecting…</p><ul id="jobs"></ul></main>
+<script>
+let previous = "";
+async function refresh() {
+  try {
+    const response = await fetch(location.pathname + "/status");
+    if (!response.ok) throw new Error();
+    const data = await response.json();
+    document.querySelector("#device").textContent = "Device: " + data.device;
+    document.querySelector("#workspace").textContent = "Workspace: " + data.workspace;
+    const next = JSON.stringify(data.jobs);
+    if (next !== previous) {
+      document.querySelector("#jobs").replaceChildren(...data.jobs.map(job => {
+        const li = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = "/jobs/" + encodeURIComponent(job.id);
+        link.textContent = job.id;
+        li.append(link, " · " + job.state);
+        return li;
+      }));
+      previous = next;
+    }
+    const status = document.querySelector("#status");
+    const message = data.jobs.length ? "" : "No background jobs yet.";
+    if (status.textContent !== message) status.textContent = message;
+  } catch { document.querySelector("#status").textContent = "Connection lost. Reconnecting…"; }
+  setTimeout(refresh, 1000);
+}
+refresh();
+</script></html>"""
+
+
+def start_job_console(jobs, device="default"):
+    dashboard_path = "/dashboard/" + secrets.token_urlsafe(24)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
@@ -337,21 +379,29 @@ def start_job_console(jobs):
         def do_GET(self):
             host = f"127.0.0.1:{self.server.server_port}"
             parts = self.path.split("/")
-            if (self.headers.get("Host") != host or len(parts) not in (3, 4)
-                    or parts[:2] != ["", "jobs"] or (len(parts) == 4 and parts[3] != "status")):
+            if self.headers.get("Host") != host:
                 self.send_error(404)
                 return
-            result = jobs.snapshot(parts[2])
-            if result is None:
-                self.send_error(404)
-                return
-            if len(parts) == 4:
-                state, output, _ = result
-                body = json.dumps({"state": state, "output": output})
+            if self.path == dashboard_path:
+                body, content_type = DASHBOARD, "text/html; charset=utf-8"
+            elif self.path == dashboard_path + "/status":
+                body = json.dumps({"device": device, "workspace": str(WORKSPACE), "jobs": jobs.list_jobs()})
                 content_type = "application/json"
             else:
-                body = JOB_CONSOLE
-                content_type = "text/html; charset=utf-8"
+                if (len(parts) not in (3, 4) or parts[:2] != ["", "jobs"]
+                        or (len(parts) == 4 and parts[3] != "status")):
+                    self.send_error(404)
+                    return
+                result = jobs.snapshot(parts[2])
+                if result is None:
+                    self.send_error(404)
+                    return
+                if len(parts) == 4:
+                    state, output, _ = result
+                    body = json.dumps({"state": state, "output": output})
+                    content_type = "application/json"
+                else:
+                    body, content_type = JOB_CONSOLE, "text/html; charset=utf-8"
             payload = body.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", content_type)
@@ -371,6 +421,7 @@ def start_job_console(jobs):
         terminal_message("Live job console unavailable", "Could not open a localhost port.", color="33")
         return None
     Thread(target=server.serve_forever, daemon=True).start()
+    terminal_message("Local dashboard", f"http://127.0.0.1:{server.server_port}{dashboard_path}")
     return server
 
 
@@ -412,6 +463,15 @@ class ShellJobs:
             details.extend(("", f"Live console: http://127.0.0.1:{self.console.server_port}/jobs/{job_id}"))
         terminal_message("Background job started", *details, color="32")
         return tool_result(f"Background job started. Job ID: {job_id}")
+
+    def list_jobs(self):
+        with self.lock:
+            entries = []
+            for job_id, (process, _) in reversed(self.jobs.items()):
+                code = process.poll()
+                state = "Running" if code is None else f"Finished with exit code {code}"
+                entries.append({"id": job_id, "state": state})
+            return entries
 
     def snapshot(self, job_id):
         with self.lock:
@@ -560,8 +620,7 @@ def main():
     terminal_message("Signed in. Polling for tools", f"Relay: {origin}", f"Device: {args.device}",
                      f"Workspace: {json.dumps(str(WORKSPACE))}", "Press Ctrl-C to stop.", color="32")
     jobs = ShellJobs()
-    if args.allow_shell:
-        jobs.console = start_job_console(jobs)
+    jobs.console = start_job_console(jobs, args.device)
     try:
         return poll(oauth, tokens, args, session_approvals, jobs)
     finally:
@@ -569,11 +628,15 @@ def main():
 
 
 def poll(oauth, tokens, args, session_approvals, jobs):
+    next_heartbeat = 0
     while True:
         try:
             jobs.report_completed()
             poll_started = time.monotonic()
-            job = oauth.post("/mcp/host/poll", {}, tokens["access_token"])
+            heartbeat = poll_started >= next_heartbeat
+            job = oauth.post("/mcp/host/poll", {}, tokens["access_token"], heartbeat=heartbeat)
+            if heartbeat:
+                next_heartbeat = poll_started + 30
             if job:
                 result = run_job(job, args.allow_shell, poll_started, session_approvals, args.approve_all_session, jobs)
                 if job.get("tool") != "get_shell_job_status" and (
