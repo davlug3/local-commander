@@ -69,6 +69,10 @@ const hostPrefix = "/mcp/host/";
 
 function roleFor(auth) {
   const redirect = new URL(auth.redirectUri);
+  if (auth.scope.includes("dashboard:read")) {
+    if (auth.scope.length !== 1) throw new Error("Use only the dashboard scope.");
+    return "dashboard";
+  }
   if (!auth.scope.includes(hostScope)) return "mcp";
   const device = deviceFor(auth);
   if (auth.scope.length !== 1 || redirect.protocol !== "http:" ||
@@ -323,7 +327,12 @@ async function authorize(request, env) {
 }
 
 async function hostRequest(request, env, path, device) {
-  if (path === hostPrefix + "poll") return relay(env, "/poll", {}, device);
+  if (path === hostPrefix + "poll") {
+    if (request.headers.get("X-Local-Commander-Heartbeat") === "1") {
+      await relay(env, "/heartbeat", { device }, "@dashboard");
+    }
+    return relay(env, "/poll", {}, device);
+  }
   if (path !== hostPrefix + "result") return new Response(null, { status: 404 });
   const raw = await request.text();
   if (raw.length > 100_000) return new Response(null, { status: 413 });
@@ -342,8 +351,12 @@ const oauthOptions = {
         if (ctx.props.role !== "host") return new Response(null, { status: 403 });
         return hostRequest(request, env, path, ctx.props.device ?? "default");
       }
+      if (path === "/mcp/dashboard") {
+        if (ctx.props.role !== "dashboard") return new Response(null, { status: 403 });
+        return relay(env, "/devices", {}, "@dashboard");
+      }
       if (path !== "/mcp") return new Response(null, { status: 404 });
-      if (ctx.props.role === "host") return new Response(null, { status: 403 });
+      if (ctx.props.role === "host" || ctx.props.role === "dashboard") return new Response(null, { status: 403 });
       const raw = await request.text();
       if (raw.length > 65536) return new Response(null, { status: 413 });
       let message;
@@ -393,7 +406,7 @@ const oauthOptions = {
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
-  scopesSupported: ["mcp:read", hostScope],
+  scopesSupported: ["mcp:read", hostScope, "dashboard:read"],
   accessTokenTTL: 3600,
   clientIdMetadataDocumentEnabled: false,
 };
@@ -418,6 +431,15 @@ export class Relay extends DurableObject {
 
   async fetch(request) {
     const { pathname } = new URL(request.url);
+    if (pathname === "/heartbeat") {
+      const { device } = await request.json();
+      await this.ctx.storage.put("device:" + device, Date.now());
+      return new Response(null, { status: 204 });
+    }
+    if (pathname === "/devices") {
+      const devices = await this.ctx.storage.list({ prefix: "device:", limit: 128 });
+      return json({ devices: Array.from(devices, ([key, lastSeen]) => ({ name: key.slice(7), lastSeen })) });
+    }
     if (pathname === "/call") {
       const payload = await request.json();
       if (this.pending.size >= 4) return json(failure("Local Commander is busy."));
@@ -453,10 +475,96 @@ export class Relay extends DurableObject {
   }
 }
 
+function remoteDashboard() {
+  const nonce = crypto.randomUUID();
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Commander · Devices</title>
+<style nonce="${nonce}">:root{color-scheme:dark;background:#101918;color:#e5f3ef;font:16px system-ui}
+main{max-width:54rem;margin:4rem auto;padding:0 1rem}ul{padding:0;list-style:none}
+li{border:1px solid #39564c;border-radius:.55rem;padding:1rem;margin:.6rem 0}
+button{font:inherit;padding:.65rem 1rem;border:1px solid #79c9ac;border-radius:.5rem;background:#254538;cursor:pointer}
+p{color:#b0c9c0}</style>
+<main><h1>Local Commander</h1><h2>Devices</h2><p id="state" role="status">Sign in to view your devices.</p>
+<button id="sign-in">Sign in</button><ul id="devices"></ul></main>
+<script nonce="${nonce}">
+const statusLine = document.querySelector("#state");
+const button = document.querySelector("#sign-in");
+const list = document.querySelector("#devices");
+const callback = location.origin + location.pathname;
+const resource = location.origin + "/mcp";
+const random = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), n => n.toString(16).padStart(2,"0")).join("");
+async function post(path, body, headers={}) {
+  const response = await fetch(path,{method:"POST",body,headers,cache:"no-store"});
+  if (!response.ok) throw new Error("Request failed");
+  return response.json();
+}
+button.onclick = async () => {
+  button.disabled = true;
+  try {
+    const registration = await post("/register",JSON.stringify({
+      client_name:"Local Commander dashboard",redirect_uris:[callback],
+      token_endpoint_auth_method:"none",grant_types:["authorization_code"],response_types:["code"]
+    }),{"Content-Type":"application/json"});
+    const verifier=random(), state=random();
+    const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(verifier));
+    const challenge=btoa(String.fromCharCode(...new Uint8Array(hash))).split("+").join("-").split("/").join("_").split("=")[0];
+    sessionStorage.setItem("lc-dashboard-oauth",JSON.stringify({client_id:registration.client_id,verifier,state}));
+    location.assign("/authorize?"+new URLSearchParams({
+      client_id:registration.client_id,redirect_uri:callback,resource,response_type:"code",
+      scope:"dashboard:read",state,code_challenge:challenge,code_challenge_method:"S256"
+    }));
+  } catch { statusLine.textContent="Could not start sign-in. Try again."; button.disabled=false; }
+};
+async function refresh(token) {
+  try {
+    const data=await post("/mcp/dashboard", "{}", {Authorization:"Bearer "+token,"Content-Type":"application/json"});
+    list.replaceChildren(...data.devices.map(device => {
+      const item=document.createElement("li");
+      const age=Date.now()-device.lastSeen;
+      item.textContent=device.name+" · "+(age < 90000 ? "Online" : "Offline")+" · "+
+        new Date(device.lastSeen).toLocaleString();
+      return item;
+    }));
+    statusLine.textContent=data.devices.length?"Last check-in shown in your local time.":"No devices have checked in yet.";
+    setTimeout(()=>refresh(token),15000);
+  } catch {
+    list.replaceChildren();
+    statusLine.textContent="Could not load devices. Sign in again.";
+    button.hidden=false;
+  }
+}
+async function finish() {
+  const params=new URLSearchParams(location.search);
+  if (!params.has("code") && !params.has("error")) return;
+  history.replaceState(null,"",location.pathname);
+  const pending=JSON.parse(sessionStorage.getItem("lc-dashboard-oauth") || "null");
+  sessionStorage.removeItem("lc-dashboard-oauth");
+  try {
+    if (!pending || params.get("state")!==pending.state || params.get("iss")!==location.origin || !params.has("code")) throw new Error();
+    const token=await post("/token",new URLSearchParams({
+      grant_type:"authorization_code",client_id:pending.client_id,code_verifier:pending.verifier,
+      code:params.get("code"),redirect_uri:callback,resource
+    }));
+    button.hidden=true;
+    await refresh(token.access_token);
+  } catch { statusLine.textContent="Sign-in did not complete. Try again."; }
+}
+finish();
+</script></html>`, { headers: {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'; script-src 'nonce-" + nonce + "'; style-src 'nonce-" +
+      nonce + "'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  }});
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.origin !== env.RELAY_ORIGIN) return new Response(null, { status: 404 });
+    if (request.method === "GET" && url.pathname === "/dashboard") return remoteDashboard();
     oauth ??= new OAuthProvider({
       ...oauthOptions,
       resourceMetadata: {
