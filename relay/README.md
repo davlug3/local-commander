@@ -56,7 +56,7 @@ Deploy the Worker after configuring your sign-in method:
 npx wrangler deploy
 ```
 
-Use one host client per Worker. An idle client polls every five seconds, or
+Use one host client per device name. An idle client polls every five seconds, or
 about 17,280 requests per day.
 
 ## 2. Connect the machine
@@ -148,3 +148,18 @@ When a job starts, click its **Live console** URL in the host terminal, or
 paste it into a browser on the same device. The console refreshes once per
 second and shows the latest 8 KiB of output. Output appears when the command
 flushes it. The link works only while that client and job record are available.
+
+## Multiple devices
+
+Run one client per device with a unique name on the same relay, for example:
+
+```bash
+python3 "${XDG_DATA_HOME:-$HOME/.local/share}/local-commander/connect.py" \\
+  --device laptop --allow-shell https://YOUR-WORKER.workers.dev
+```
+
+Use a different name on the other machine, such as `termux`. Names are 1–32
+lowercase letters, digits, or hyphens and start with a letter or digit. Sign
+in on each device. To route a tool call, specify its name in ChatGPT, for
+example “Run pwd on device laptop.” Use that same device for background-job
+status. Calls without a device keep using the legacy `default` client.
