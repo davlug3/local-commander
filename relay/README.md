@@ -158,8 +158,12 @@ python3 "${XDG_DATA_HOME:-$HOME/.local/share}/local-commander/connect.py" \\
   --device laptop --allow-shell https://YOUR-WORKER.workers.dev
 ```
 
-Use a different name on the other machine, such as `termux`. Names are 1–32
-lowercase letters, digits, or hyphens and start with a letter or digit. Sign
+If you omit `--device`, the client uses its computer hostname, lowercased and
+normalized to fit the device naming rules. The terminal prints the selected
+name after sign-in. Use `--device` to override it, especially if two devices
+would have the same name. Names are 1–32 lowercase letters, digits, or hyphens
+and start with a letter or digit. Sign
 in on each device. To route a tool call, specify its name in ChatGPT, for
 example “Run pwd on device laptop.” Use that same device for background-job
-status. Calls without a device keep using the legacy `default` client.
+status. Tool calls without a device still route to the legacy `default` queue. Start
+one client with `--device default` if you want to keep that behavior.
