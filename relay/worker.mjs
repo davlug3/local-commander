@@ -74,7 +74,7 @@ const hostScope = "host:connect";
 const hostPrefix = "/mcp/host/";
 
 
-function roleFor(auth) {
+function roleFor(auth, origin) {
   const redirect = new URL(auth.redirectUri);
   if (auth.scope.includes("dashboard:read")) {
     if (auth.scope.length !== 1) throw new Error("Use only the dashboard scope.");
@@ -82,9 +82,11 @@ function roleFor(auth) {
   }
   if (!auth.scope.includes(hostScope)) return "mcp";
   const device = deviceFor(auth);
-  if (auth.scope.length !== 1 || redirect.protocol !== "http:" ||
-      redirect.hostname !== "127.0.0.1" || !redirect.port ||
-      !device || redirect.search || redirect.hash) {
+  const loopback = redirect.protocol === "http:" && redirect.hostname === "127.0.0.1" &&
+    Boolean(redirect.port) && !redirect.pathname.startsWith("/pair/");
+  const headless = redirect.origin === origin && redirect.pathname.startsWith("/pair/");
+  if (auth.scope.length !== 1 || (!loopback && !headless) ||
+      !device || redirect.search || redirect.hash || redirect.username || redirect.password) {
     throw new Error("Host authorization requires the local client callback.");
   }
   return "host";
@@ -93,7 +95,8 @@ function roleFor(auth) {
 function deviceFor(auth) {
   const path = new URL(auth.redirectUri).pathname;
   if (path === "/callback") return "default";
-  const device = path.startsWith("/callback/") ? path.slice(10) : "";
+  const device = path.startsWith("/callback/") ? path.slice(10) :
+    path.startsWith("/pair/") ? path.slice(6) : "";
   return devicePattern.test(device) ? device : null;
 }
 
@@ -107,8 +110,8 @@ function escapeHtml(value) {
   ));
 }
 
-async function approve(provider, auth, headers) {
-  const role = roleFor(auth);
+async function approve(provider, auth, headers, origin) {
+  const role = roleFor(auth, origin);
   const { redirectTo } = await provider.completeAuthorization({
     request: auth,
     userId: "owner",
@@ -116,7 +119,12 @@ async function approve(provider, auth, headers) {
     scope: auth.scope,
     props: { owner: true, role, ...(role === "host" ? { device: deviceFor(auth) } : {}) },
   });
-  headers.set("Location", redirectTo);
+  const redirect = new URL(redirectTo);
+  if (role === "host" && redirect.origin === origin && redirect.pathname.startsWith("/pair/")) {
+    redirect.hash = redirect.search.slice(1);
+    redirect.search = "";
+  }
+  headers.set("Location", redirect.href);
   return new Response(null, { status: 303, headers });
 }
 
@@ -189,7 +197,7 @@ async function githubCallback(provider, request, env, setStage) {
     throw new Error("GitHub owner verification failed.");
   }
   setStage("localcommander-grant");
-  return approve(provider, auth, headers);
+  return approve(provider, auth, headers, env.RELAY_ORIGIN);
 }
 
 function signInPage({ title, description, body, headers = new Headers(), status = 200 }) {
@@ -252,7 +260,7 @@ async function authorize(request, env) {
     if (url.pathname !== "/authorize") return new Response(null, { status: 404 });
     if (request.method === "GET") {
       const auth = await provider.parseAuthRequest(request);
-      const role = roleFor(auth);
+      const role = roleFor(auth, url.origin);
       const { handle, headers } = await provider.beginConsent(auth);
       const hidden = `<input type="hidden" name="handle" value="${escapeHtml(handle)}">`;
       const github = githubEnabled(env) ? `<form method="post" action="/authorize">${hidden}
@@ -306,7 +314,7 @@ async function authorize(request, env) {
       return signInPage({ title: "Sign-in failed", description: "The owner passphrase was incorrect. Restart the connection to try again.", body: "", status: 403 });
     }
     const approved = await provider.approveConsent(request, String(form.get("handle")));
-    return await approve(provider, approved.request, approved.headers);
+    return await approve(provider, approved.request, approved.headers, url.origin);
   } catch (error) {
     const consentErrors = {
       "Missing transaction handle": "missing-handle",
@@ -576,11 +584,41 @@ finish();
   }});
 }
 
+function headlessPairPage() {
+  const nonce = crypto.randomUUID();
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Commander · Pairing</title>
+<style nonce="${nonce}">:root{color-scheme:dark;background:#101918;color:#e5f3ef;font:16px system-ui}
+main{max-width:38rem;margin:4rem auto;padding:0 1rem}textarea{width:100%;box-sizing:border-box;font:inherit;padding:.75rem}</style>
+<main><h1>Local Commander</h1><p id="message">Start pairing from your terminal.</p>
+<textarea id="code" rows="3" readonly hidden aria-label="One-time pairing code"></textarea></main>
+<script nonce="${nonce}">
+const params = new URLSearchParams(location.hash.slice(1));
+history.replaceState(null, "", location.pathname);
+const code = params.get("code"), state = params.get("state");
+if (code && state && params.get("iss") === location.origin) {
+  const field = document.getElementById("code");
+  field.value = state + ":" + code;
+  field.hidden = false;
+  field.select();
+  document.getElementById("message").textContent = "Copy this one-time code into the terminal that started pairing.";
+}
+</script></html>`, { headers: {
+    "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'; script-src 'nonce-" + nonce +
+      "'; style-src 'nonce-" + nonce + "'; frame-ancestors 'none'; base-uri 'none'",
+  }});
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.origin !== env.RELAY_ORIGIN) return new Response(null, { status: 404 });
     if (request.method === "GET" && url.pathname === "/dashboard") return remoteDashboard();
+    if (request.method === "GET" && url.pathname.startsWith("/pair/") && devicePattern.test(url.pathname.slice(6))) {
+      return headlessPairPage();
+    }
     oauth ??= new OAuthProvider({
       ...oauthOptions,
       resourceMetadata: {
