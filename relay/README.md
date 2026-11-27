@@ -179,3 +179,12 @@ Sign in with an existing Worker sign-in method to view device names and their
 last check-in. A host is marked offline after 90 seconds without a check-in.
 Update and restart each client to enable reporting. Job output stays on the
 local dashboard. The remote dashboard has no shell execution controls.
+
+## Headless sign-in
+
+Add `--headless` to the host startup command when the host has no browser.
+Open the printed URL on another device and sign in with GitHub or the owner
+passphrase. Copy the one-time pairing code displayed on the relay page into
+the terminal that started the request. The terminal matches the code to its
+sign-in attempt and uses PKCE for redemption. This requires the updated Worker
+and host client. Keep the pairing code private.
