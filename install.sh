@@ -138,6 +138,7 @@ from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -195,8 +196,9 @@ def open_sign_in_browser(url):
 
 
 class OAuth:
-    def __init__(self, origin):
+    def __init__(self, origin, device="default"):
         self.origin = origin
+        self.callback_path = "/callback" if device == "default" else f"/callback/{device}"
         self.resource = origin + "/mcp"
         self.opener = build_opener(NoRedirects())
 
@@ -219,6 +221,7 @@ class OAuth:
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(sha256(verifier.encode()).digest()).decode().rstrip("=")
         callback = {}
+        callback_path = self.callback_path
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -227,7 +230,7 @@ class OAuth:
             def do_GET(self):
                 url = urlsplit(self.path)
                 values = parse_qs(url.query)
-                if url.path != "/callback" or values.get("state") != [state]:
+                if url.path != callback_path or values.get("state") != [state]:
                     self.send_error(400, "Invalid sign-in callback")
                     return
                 callback.update(values)
@@ -239,7 +242,7 @@ class OAuth:
 
         with HTTPServer(("127.0.0.1", 0), Handler) as listener:
             listener.timeout = 1
-            redirect = f"http://127.0.0.1:{listener.server_port}/callback"
+            redirect = f"http://127.0.0.1:{listener.server_port}{callback_path}"
             registration = self.post("/register", {
                 "client_name": "Local Commander host",
                 "redirect_uris": [redirect],
@@ -529,22 +532,25 @@ def confirm_session_shell(origin):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("relay", help="Origin of your Cloudflare Worker")
+    parser.add_argument("--device", default="default", help="Unique device name (lowercase letters, digits and hyphens)")
     parser.add_argument("--allow-shell", action="store_true", help="Enable shell requests with local approval")
     parser.add_argument("--approve-all-session", action="store_true",
                         help="Confirm once locally to approve commands using the host default or session approval until this client exits")
     args = parser.parse_args()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", args.device):
+        parser.error("--device must start with a lowercase letter or digit and contain at most 32 letters, digits or hyphens")
     if args.approve_all_session and not args.allow_shell:
         parser.error("--approve-all-session requires --allow-shell")
     url = urlsplit(args.relay.rstrip("/"))
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.path or url.query or url.fragment:
         parser.error("Provide an HTTPS origin with no path.")
     origin = f"https://{url.netloc.lower()}"
-    oauth = OAuth(origin)
+    oauth = OAuth(origin, args.device)
     if args.approve_all_session and not confirm_session_shell(origin):
         sys.exit("Session-wide shell access was not approved.")
     tokens = oauth.sign_in()
     session_approvals = set()
-    terminal_message("Signed in. Polling for tools", f"Relay: {origin}",
+    terminal_message("Signed in. Polling for tools", f"Relay: {origin}", f"Device: {args.device}",
                      f"Workspace: {json.dumps(str(WORKSPACE))}", "Press Ctrl-C to stop.", color="32")
     jobs = ShellJobs()
     if args.allow_shell:
