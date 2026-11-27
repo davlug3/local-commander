@@ -1,13 +1,19 @@
 import { DurableObject } from "cloudflare:workers";
 import { OAuthProvider, authorizationErrorRedirect } from "@cloudflare/workers-oauth-provider";
 
+const devicePattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const deviceField = {
+  type: "string", pattern: devicePattern.source,
+  description: "Paired device name. Omit to use the default device.",
+};
+
 const tools = ["git_status", "python_version"];
 const schema = {
   name: "run_local_tool",
   description: "Check Git status or Python version on the paired machine.",
   inputSchema: {
     type: "object",
-    properties: { tool: { type: "string", enum: tools } },
+    properties: { tool: { type: "string", enum: tools }, device: deviceField },
     required: ["tool"],
     additionalProperties: false,
   },
@@ -20,6 +26,7 @@ const shellSchema = {
   inputSchema: {
     type: "object",
     properties: {
+      device: deviceField,
       command: { type: "string", minLength: 1, maxLength: 8192 },
       mode: { type: "string", enum: ["foreground", "background"] },
       permission: {
@@ -35,10 +42,10 @@ const shellSchema = {
 
 const jobStatusSchema = {
   name: "get_shell_job_status",
-  description: "Check a background shell job by ID. Returns its current status, final exit code when available, and recent output.",
+  description: "Check a background shell job by ID on the same device that started it. Returns its current status, final exit code when available, and recent output.",
   inputSchema: {
     type: "object",
-    properties: { job_id: { type: "string", pattern: "^[0-9a-f]{32}$" } },
+    properties: { job_id: { type: "string", pattern: "^[0-9a-f]{32}$" }, device: deviceField },
     required: ["job_id"],
     additionalProperties: false,
   },
@@ -59,15 +66,24 @@ async function matches(candidate, secret) {
 const hostScope = "host:connect";
 const hostPrefix = "/mcp/host/";
 
+
 function roleFor(auth) {
   const redirect = new URL(auth.redirectUri);
   if (!auth.scope.includes(hostScope)) return "mcp";
+  const device = deviceFor(auth);
   if (auth.scope.length !== 1 || redirect.protocol !== "http:" ||
       redirect.hostname !== "127.0.0.1" || !redirect.port ||
-      redirect.pathname !== "/callback" || redirect.search || redirect.hash) {
+      !device || redirect.search || redirect.hash) {
     throw new Error("Host authorization requires the local client callback.");
   }
   return "host";
+}
+
+function deviceFor(auth) {
+  const path = new URL(auth.redirectUri).pathname;
+  if (path === "/callback") return "default";
+  const device = path.startsWith("/callback/") ? path.slice(10) : "";
+  return devicePattern.test(device) ? device : null;
 }
 
 function githubEnabled(env) {
@@ -87,7 +103,7 @@ async function approve(provider, auth, headers) {
     userId: "owner",
     metadata: {},
     scope: auth.scope,
-    props: { owner: true, role },
+    props: { owner: true, role, ...(role === "host" ? { device: deviceFor(auth) } : {}) },
   });
   headers.set("Location", redirectTo);
   return new Response(null, { status: 303, headers });
@@ -306,12 +322,12 @@ async function authorize(request, env) {
   }
 }
 
-async function hostRequest(request, env, path) {
-  if (path === hostPrefix + "poll") return relay(env, "/poll", {});
+async function hostRequest(request, env, path, device) {
+  if (path === hostPrefix + "poll") return relay(env, "/poll", {}, device);
   if (path !== hostPrefix + "result") return new Response(null, { status: 404 });
   const raw = await request.text();
   if (raw.length > 100_000) return new Response(null, { status: 413 });
-  try { return await relay(env, "/result", JSON.parse(raw)); }
+  try { return await relay(env, "/result", JSON.parse(raw), device); }
   catch { return new Response(null, { status: 400 }); }
 }
 
@@ -324,7 +340,7 @@ const oauthOptions = {
       if (ctx.props?.owner !== true) return new Response(null, { status: 403 });
       if (path.startsWith(hostPrefix)) {
         if (ctx.props.role !== "host") return new Response(null, { status: 403 });
-        return hostRequest(request, env, path);
+        return hostRequest(request, env, path, ctx.props.device ?? "default");
       }
       if (path !== "/mcp") return new Response(null, { status: 404 });
       if (ctx.props.role === "host") return new Response(null, { status: 403 });
@@ -351,21 +367,25 @@ const oauthOptions = {
       if (method !== "tools/call") return rpc(id, null, -32601, "Method not found");
       const args = params?.arguments;
       if (!args || typeof args !== "object" || Array.isArray(args)) return rpc(id, null, -32602, "Invalid arguments");
+      const { device = "default", ...toolArgs } = args;
+      if (typeof device !== "string" || !devicePattern.test(device)) {
+        return rpc(id, null, -32602, "Invalid device name");
+      }
       let job;
-      if (params.name === schema.name && Object.keys(args).length === 1 && tools.includes(args.tool)) {
-        job = { tool: args.tool };
-      } else if (params.name === shellSchema.name && Object.keys(args).every((key) => ["command", "permission", "mode"].includes(key)) &&
-          (args.permission === undefined || ["once", "session"].includes(args.permission)) &&
-          (args.mode === undefined || ["foreground", "background"].includes(args.mode)) && typeof args.command === "string" &&
-          args.command.length <= 8192 && args.command.trim() && !args.command.includes("\0")) {
-        job = { tool: shellSchema.name, command: args.command, permission: args.permission, mode: args.mode };
-      } else if (params.name === jobStatusSchema.name && Object.keys(args).length === 1 &&
-          typeof args.job_id === "string" && /^[0-9a-f]{32}$/.test(args.job_id)) {
-        job = { tool: jobStatusSchema.name, job_id: args.job_id };
+      if (params.name === schema.name && Object.keys(toolArgs).length === 1 && tools.includes(toolArgs.tool)) {
+        job = { tool: toolArgs.tool };
+      } else if (params.name === shellSchema.name && Object.keys(toolArgs).every((key) => ["command", "permission", "mode"].includes(key)) &&
+          (toolArgs.permission === undefined || ["once", "session"].includes(toolArgs.permission)) &&
+          (toolArgs.mode === undefined || ["foreground", "background"].includes(toolArgs.mode)) && typeof toolArgs.command === "string" &&
+          toolArgs.command.length <= 8192 && toolArgs.command.trim() && !toolArgs.command.includes("\0")) {
+        job = { tool: shellSchema.name, command: toolArgs.command, permission: toolArgs.permission, mode: toolArgs.mode };
+      } else if (params.name === jobStatusSchema.name && Object.keys(toolArgs).length === 1 &&
+          typeof toolArgs.job_id === "string" && /^[0-9a-f]{32}$/.test(toolArgs.job_id)) {
+        job = { tool: jobStatusSchema.name, job_id: toolArgs.job_id };
       } else {
         return rpc(id, null, -32602, "Invalid tool or arguments");
       }
-      const response = await relay(env, "/call", job);
+      const response = await relay(env, "/call", job, device);
       return rpc(id, await response.json());
     },
   },
@@ -384,8 +404,8 @@ function rpc(id, result, code, message) {
   return json({ jsonrpc: "2.0", id, ...(code ? { error: { code, message } } : { result }) });
 }
 
-function relay(env, path, data) {
-  const stub = env.RELAY.get(env.RELAY.idFromName("single-host"));
+function relay(env, path, data, device) {
+  const stub = env.RELAY.get(env.RELAY.idFromName(device === "default" ? "single-host" : "device:" + device));
   return stub.fetch("https://relay.internal" + path, { method: "POST", body: JSON.stringify(data) });
 }
 
