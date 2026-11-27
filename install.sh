@@ -137,6 +137,7 @@ import base64
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import json
+import getpass
 import os
 import re
 import signal
@@ -197,8 +198,10 @@ def open_sign_in_browser(url):
 
 
 class OAuth:
-    def __init__(self, origin, device="default"):
+    def __init__(self, origin, device="default", headless=False):
         self.origin = origin
+        self.device = device
+        self.headless = headless
         self.callback_path = "/callback" if device == "default" else f"/callback/{device}"
         self.resource = origin + "/mcp"
         self.opener = build_opener(NoRedirects())
@@ -223,6 +226,17 @@ class OAuth:
         state = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(sha256(verifier.encode()).digest()).decode().rstrip("=")
+        if self.headless:
+            redirect = f"{self.origin}/pair/{self.device}"
+            login = self.prepare_sign_in(redirect, state, challenge)
+            terminal_message("Local Commander | Headless sign-in",
+                             "Open this URL in a browser on another device:", login,
+                             "After approval, paste the one-time pairing code here.")
+            entered = getpass.getpass("Pairing code: ").strip()
+            code_state, separator, code = entered.partition(":")
+            if not separator or not code or not secrets.compare_digest(code_state, state):
+                raise ValueError("The pairing code does not match this sign-in attempt.")
+            return self.exchange_code(redirect, code, verifier)
         callback = {}
         callback_path = self.callback_path
 
@@ -246,19 +260,7 @@ class OAuth:
         with HTTPServer(("127.0.0.1", 0), Handler) as listener:
             listener.timeout = 1
             redirect = f"http://127.0.0.1:{listener.server_port}{callback_path}"
-            registration = self.post("/register", {
-                "client_name": "Local Commander host",
-                "redirect_uris": [redirect],
-                "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
-            })
-            self.client_id = registration["client_id"]
-            login = self.origin + "/authorize?" + urlencode({
-                "client_id": self.client_id, "redirect_uri": redirect, "resource": self.resource,
-                "response_type": "code", "scope": "host:connect", "state": state,
-                "code_challenge": challenge, "code_challenge_method": "S256",
-            })
+            login = self.prepare_sign_in(redirect, state, challenge)
             terminal_message("Local Commander | Sign in", "Open this URL on this device:", login)
             open_sign_in_browser(login)
             deadline = time.monotonic() + 300
@@ -267,9 +269,27 @@ class OAuth:
 
         if len(callback.get("code", [])) != 1 or callback.get("iss") != [self.origin]:
             raise ValueError("Sign-in was denied, timed out, or returned an invalid issuer.")
+        return self.exchange_code(redirect, callback["code"][0], verifier)
+
+    def prepare_sign_in(self, redirect, state, challenge):
+        registration = self.post("/register", {
+            "client_name": "Local Commander host",
+            "redirect_uris": [redirect],
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        })
+        self.client_id = registration["client_id"]
+        return self.origin + "/authorize?" + urlencode({
+            "client_id": self.client_id, "redirect_uri": redirect, "resource": self.resource,
+            "response_type": "code", "scope": "host:connect", "state": state,
+            "code_challenge": challenge, "code_challenge_method": "S256",
+        })
+
+    def exchange_code(self, redirect, code, verifier):
         return self.post("/token", {
             "grant_type": "authorization_code", "client_id": self.client_id,
-            "redirect_uri": redirect, "code": callback["code"][0], "code_verifier": verifier,
+            "redirect_uri": redirect, "code": code, "code_verifier": verifier,
             "resource": self.resource,
         }, form=True)
 
@@ -601,6 +621,7 @@ def main():
     parser.add_argument("--allow-shell", action="store_true", help="Enable shell requests with local approval")
     parser.add_argument("--approve-all-session", action="store_true",
                         help="Confirm once locally to approve commands using the host default or session approval until this client exits")
+    parser.add_argument("--headless", action="store_true", help="Sign in using a browser on another device")
     args = parser.parse_args()
     if args.device is None:
         args.device = hostname_device()
@@ -612,7 +633,7 @@ def main():
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.path or url.query or url.fragment:
         parser.error("Provide an HTTPS origin with no path.")
     origin = f"https://{url.netloc.lower()}"
-    oauth = OAuth(origin, args.device)
+    oauth = OAuth(origin, args.device, args.headless)
     if args.approve_all_session and not confirm_session_shell(origin):
         sys.exit("Session-wide shell access was not approved.")
     tokens = oauth.sign_in()
